@@ -1,0 +1,11 @@
+/bin/
+/gateway
+/main
+/server
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
