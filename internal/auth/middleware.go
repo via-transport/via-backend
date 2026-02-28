@@ -75,9 +75,21 @@ func Middleware(cfg MiddlewareConfig) func(http.Handler) http.Handler {
 
 			// --- When auth is disabled (local dev) ---
 			if !cfg.Enabled {
+				// Still try to parse JWT if present, so profile/etc. work
 				id := Identity{
 					UserID: "dev",
 					Role:   RoleService,
+				}
+				if authH := r.Header.Get("Authorization"); strings.HasPrefix(authH, "Bearer ") {
+					token := strings.TrimPrefix(authH, "Bearer ")
+					if parsed, err := validateJWT(cfg.JWTSecret, token); err == nil {
+						id = parsed
+					} else {
+						// Try base64 decode of payload as fallback
+						if fallbackID, err2 := decodeJWTClaimsUnsafe(token); err2 == nil {
+							id = fallbackID
+						}
+					}
 				}
 				ctx := ContextWithIdentity(r.Context(), id)
 				next.ServeHTTP(w, r.WithContext(ctx))

@@ -18,6 +18,7 @@ import (
 	"via-backend/internal/authsvc"
 	"via-backend/internal/cache"
 	"via-backend/internal/config"
+	"via-backend/internal/database"
 	"via-backend/internal/fleetsvc"
 	"via-backend/internal/messaging"
 	"via-backend/internal/notifysvc"
@@ -72,39 +73,8 @@ func main() {
 		log.Fatalf("[main] %v", err)
 	}
 
-	// 4b. Provision KV buckets for microservices.
-	usersKV, err := broker.ProvisionKV("VIA_USERS", "User accounts")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
-	emailsKV, err := broker.ProvisionKV("VIA_USER_EMAILS", "User email index")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
-	vehiclesKV, err := broker.ProvisionKV("VIA_VEHICLES", "Fleet vehicles")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
-	driversKV, err := broker.ProvisionKV("VIA_DRIVERS", "Fleet drivers")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
-	eventsKV, err := broker.ProvisionKV("VIA_EVENTS", "Special events")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
-	noticesKV, err := broker.ProvisionKV("VIA_NOTICES", "Driver notices")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
-	notificationsKV, err := broker.ProvisionKV("VIA_NOTIFICATIONS", "User notifications")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
-	subscriptionsKV, err := broker.ProvisionKV("VIA_SUBSCRIPTIONS", "Vehicle subscriptions")
-	if err != nil {
-		log.Fatalf("[main] %v", err)
-	}
+	// 4b. Build service stores (NATS KV or PostgreSQL).
+	// NOTE: caches are created before stores since NATS branch needs appCache.
 
 	// 5. Caches
 	gpsCache := cache.New(cfg.GPSBootstrapMaxAge)
@@ -115,6 +85,66 @@ func main() {
 	)
 	stopCleanup := appCache.StartCleanup(cfg.CacheCleanupInterval)
 	defer stopCleanup()
+
+	var authStore authsvc.UserStore
+	var fleetStore fleetsvc.FleetStore
+	var notifyStore notifysvc.NotifStore
+	var subStore subsvc.SubStore
+
+	if cfg.StoreBackend == "nats" {
+		log.Println("[main] store backend: NATS KV")
+		usersKV, err := broker.ProvisionKV("VIA_USERS", "User accounts")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		emailsKV, err := broker.ProvisionKV("VIA_USER_EMAILS", "User email index")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		vehiclesKV, err := broker.ProvisionKV("VIA_VEHICLES", "Fleet vehicles")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		driversKV, err := broker.ProvisionKV("VIA_DRIVERS", "Fleet drivers")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		eventsKV, err := broker.ProvisionKV("VIA_EVENTS", "Special events")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		noticesKV, err := broker.ProvisionKV("VIA_NOTICES", "Driver notices")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		notificationsKV, err := broker.ProvisionKV("VIA_NOTIFICATIONS", "User notifications")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		subscriptionsKV, err := broker.ProvisionKV("VIA_SUBSCRIPTIONS", "Vehicle subscriptions")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		authStore = authsvc.NewStore(usersKV, emailsKV)
+		fleetStore = fleetsvc.NewStore(vehiclesKV, driversKV, eventsKV, noticesKV, appCache)
+		notifyStore = notifysvc.NewStore(notificationsKV)
+		subStore = subsvc.NewStore(subscriptionsKV)
+	} else {
+		log.Println("[main] store backend: PostgreSQL")
+		pgCfg := database.ConfigFromEnv()
+		pgPool, err := database.Connect(context.Background(), pgCfg)
+		if err != nil {
+			log.Fatalf("[main] postgres: %v", err)
+		}
+		defer pgPool.Close()
+		if err := database.Migrate(context.Background(), pgPool); err != nil {
+			log.Fatalf("[main] postgres migration: %v", err)
+		}
+		authStore = authsvc.NewPGStore(pgPool)
+		fleetStore = fleetsvc.NewPGStore(pgPool)
+		notifyStore = notifysvc.NewPGStore(pgPool)
+		subStore = subsvc.NewPGStore(pgPool)
+	}
 
 	// 6. Services
 	gpsSvc := service.NewGPSService(broker, gpsCache, kv, cfg)
@@ -134,20 +164,17 @@ func main() {
 	}
 	authsvc.SetGlobalSecret(cfg.JWTSecret) // for WebSocket auth
 
-	authStore := authsvc.NewStore(usersKV, emailsKV)
 	authHandler := authsvc.NewHandler(authStore, jwtCfg)
 	authHandler.SetUserIDFunc(func(r *http.Request) string {
 		return auth.IdentityFromContext(r.Context()).UserID
 	})
 
-	fleetStore := fleetsvc.NewStore(vehiclesKV, driversKV, eventsKV, noticesKV, appCache)
 	fleetHandler := fleetsvc.NewHandler(fleetStore, broker)
 
-	notifyStore := notifysvc.NewStore(notificationsKV)
 	notifyHandler := notifysvc.NewHandler(notifyStore, broker)
-	notifyHandler.SubscribeNATS(broker) // cross-instance notification delivery
+	notifyHandler.SubscribeNATS(broker)        // cross-instance notification delivery
+	notifyHandler.SubscribeFleetEvents(broker, subStore) // event → notification pipeline
 
-	subStore := subsvc.NewStore(subscriptionsKV)
 	subHandler := subsvc.NewHandler(subStore)
 
 	// 7. Auth / RBAC

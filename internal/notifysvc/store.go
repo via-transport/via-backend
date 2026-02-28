@@ -73,6 +73,37 @@ func (s *Store) ListForUser(ctx context.Context, userID string, unreadOnly bool)
 	return result, nil
 }
 
+// ListForFleet returns notifications for a fleet. For the NATS KV store this
+// scans all keys and filters by FleetID, which is acceptable for small datasets.
+func (s *Store) ListForFleet(ctx context.Context, fleetID string, unreadOnly bool) ([]Notification, error) {
+	keys, err := s.kv.Keys(ctx)
+	if err != nil {
+		if err.Error() == "nats: no keys found" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var result []Notification
+	for _, k := range keys {
+		entry, err := s.kv.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		var n Notification
+		if err := json.Unmarshal(entry.Value(), &n); err != nil {
+			continue
+		}
+		if n.FleetID != fleetID {
+			continue
+		}
+		if unreadOnly && n.IsRead {
+			continue
+		}
+		result = append(result, n)
+	}
+	return result, nil
+}
+
 // CountUnread returns the number of unread notifications for a user.
 // It counts inline without deserialising all notifications.
 func (s *Store) CountUnread(ctx context.Context, userID string) (int, error) {

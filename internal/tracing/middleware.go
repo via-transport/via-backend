@@ -1,7 +1,9 @@
 package tracing
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 
 	"go.opentelemetry.io/otel"
@@ -62,4 +64,12 @@ func (w *statusWriter) WriteHeader(code int) {
 		w.written = true
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker for WebSocket support.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }

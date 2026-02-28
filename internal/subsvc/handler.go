@@ -12,11 +12,11 @@ import (
 
 // Handler provides subscription REST endpoints.
 type Handler struct {
-	store *Store
+	store SubStore
 }
 
 // NewHandler creates a subscription handler.
-func NewHandler(store *Store) *Handler {
+func NewHandler(store SubStore) *Handler {
 	return &Handler{store: store}
 }
 

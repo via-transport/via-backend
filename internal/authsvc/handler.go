@@ -17,13 +17,13 @@ type UserIDFunc func(r *http.Request) string
 
 // Handler exposes auth HTTP endpoints.
 type Handler struct {
-	store        *Store
+	store        UserStore
 	jwtCfg       JWTConfig
 	userIDFromReq UserIDFunc
 }
 
 // NewHandler creates auth handlers.
-func NewHandler(store *Store, jwtCfg JWTConfig) *Handler {
+func NewHandler(store UserStore, jwtCfg JWTConfig) *Handler {
 	return &Handler{store: store, jwtCfg: jwtCfg}
 }
 

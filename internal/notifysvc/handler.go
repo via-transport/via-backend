@@ -15,13 +15,13 @@ import (
 
 // Handler provides notification REST endpoints and WebSocket delivery.
 type Handler struct {
-	store  *Store
+	store  NotifStore
 	broker *messaging.Broker
 	hub    *Hub
 }
 
 // NewHandler creates a notification handler.
-func NewHandler(store *Store, broker *messaging.Broker) *Handler {
+func NewHandler(store NotifStore, broker *messaging.Broker) *Handler {
 	h := &Handler{
 		store:  store,
 		broker: broker,
@@ -40,17 +40,37 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("/ws/notifications", h.WSHandler)
 }
 
-// List returns notifications for the authenticated user.
+// List returns notifications for the authenticated user, or for a fleet.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	fleetID := r.URL.Query().Get("fleet_id")
+	unreadOnly := r.URL.Query().Get("unread") == "true"
+
+	// If fleet_id is provided, return all notifications for that fleet.
+	if fleetID != "" {
+		notifs, err := h.store.ListForFleet(r.Context(), fleetID, unreadOnly)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+			return
+		}
+		if notifs == nil {
+			notifs = []Notification{}
+		}
+		sort.Slice(notifs, func(i, j int) bool {
+			return notifs[i].CreatedAt.After(notifs[j].CreatedAt)
+		})
+		writeJSON(w, http.StatusOK, notifs)
+		return
+	}
+
+	// Otherwise, return notifications for a specific user.
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {
 		userID = userIDFromRequest(r)
 	}
 	if userID == "" {
-		writeJSON(w, http.StatusBadRequest, errBody("user_id required"))
+		writeJSON(w, http.StatusBadRequest, errBody("user_id or fleet_id required"))
 		return
 	}
-	unreadOnly := r.URL.Query().Get("unread") == "true"
 	notifs, err := h.store.ListForUser(r.Context(), userID, unreadOnly)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))

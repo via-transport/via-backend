@@ -2,9 +2,12 @@
 package middleware
 
 import (
+	"bufio"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -33,9 +36,25 @@ func (g *gzipResponseWriter) Flush() {
 	}
 }
 
+// Hijack implements http.Hijacker, delegating to the underlying ResponseWriter.
+// This is required for WebSocket upgrades to work through the gzip middleware.
+func (g *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := g.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+}
+
 // Gzip compresses response bodies for clients that accept gzip encoding.
+// WebSocket upgrade requests are passed through without compression.
 func Gzip(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip gzip for WebSocket upgrade requests — they need http.Hijacker.
+		if strings.EqualFold(r.Header.Get("Connection"), "upgrade") ||
+			strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			next.ServeHTTP(w, r)
 			return

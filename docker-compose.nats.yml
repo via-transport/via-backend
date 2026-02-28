@@ -7,3 +7,24 @@ services:
       - "4222:4222"
       - "8222:8222"
     restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: via-postgres
+    environment:
+      POSTGRES_DB: via
+      POSTGRES_USER: via
+      POSTGRES_PASSWORD: via-dev-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - via-pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U via -d via"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  via-pg-data:

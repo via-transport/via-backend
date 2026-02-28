@@ -2,6 +2,7 @@ package fleetsvc
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -16,12 +17,12 @@ import (
 
 // Handler exposes fleet CRUD endpoints.
 type Handler struct {
-	store  *Store
+	store  FleetStore
 	broker *messaging.Broker
 }
 
 // NewHandler creates fleet handlers.
-func NewHandler(store *Store, broker *messaging.Broker) *Handler {
+func NewHandler(store FleetStore, broker *messaging.Broker) *Handler {
 	return &Handler{store: store, broker: broker}
 }
 
@@ -136,11 +137,24 @@ func (h *Handler) CreateVehicle(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("id")
+
+	// Read body once so we can both decode the struct and check raw keys.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid body"))
+		return
+	}
+
 	var update Vehicle
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+	if err := json.Unmarshal(bodyBytes, &update); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
+
+	// Check which keys were explicitly sent.
+	var rawFields map[string]json.RawMessage
+	_ = json.Unmarshal(bodyBytes, &rawFields)
+
 	fleetID := update.FleetID
 	if fleetID == "" {
 		fleetID = r.URL.Query().Get("fleet_id")
@@ -171,10 +185,10 @@ func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 	if update.Capacity > 0 {
 		existing.Capacity = update.Capacity
 	}
-	// Only update IsActive if explicitly set in request (not zero-value default).
-	// We use a simple heuristic: the incoming JSON was decoded into update,
-	// so we preserve existing.IsActive unless the entire object is sent.
-	// For explicit deactivation, use UpdateVehicleStatus.
+	// Only update IsActive if explicitly present in the request body.
+	if _, ok := rawFields["is_active"]; ok {
+		existing.IsActive = update.IsActive
+	}
 	existing.LastUpdated = time.Now().UTC()
 
 	if err := h.store.PutVehicle(r.Context(), existing); err != nil {
@@ -359,11 +373,22 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 	driverID := r.PathValue("id")
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid body"))
+		return
+	}
+
 	var update Driver
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+	if err := json.Unmarshal(bodyBytes, &update); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
+
+	var rawFields map[string]json.RawMessage
+	_ = json.Unmarshal(bodyBytes, &rawFields)
+
 	fleetID := update.FleetID
 	if fleetID == "" {
 		fleetID = r.URL.Query().Get("fleet_id")
@@ -384,7 +409,10 @@ func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 	if update.Phone != "" {
 		existing.Phone = update.Phone
 	}
-	// Preserve existing IsActive — use dedicated endpoint for status changes.
+	// Only update IsActive if explicitly present in the request body.
+	if _, ok := rawFields["is_active"]; ok {
+		existing.IsActive = update.IsActive
+	}
 	existing.UpdatedAt = time.Now().UTC()
 
 	if err := h.store.PutDriver(r.Context(), existing); err != nil {
