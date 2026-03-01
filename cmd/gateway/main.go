@@ -146,6 +146,14 @@ func main() {
 		subStore = subsvc.NewPGStore(pgPool)
 	}
 
+	if cfg.SeedDemoFleet {
+		seedFleetCtx, seedFleetCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := fleetsvc.EnsureDemoFleet(seedFleetCtx, fleetStore, cfg.SeedDemoFleetID); err != nil {
+			log.Printf("[main] demo fleet seed warning: %v", err)
+		}
+		seedFleetCancel()
+	}
+
 	// 6. Services
 	gpsSvc := service.NewGPSService(broker, gpsCache, kv, cfg)
 	eventSvc := service.NewEventService(broker)
@@ -172,7 +180,7 @@ func main() {
 	fleetHandler := fleetsvc.NewHandler(fleetStore, broker)
 
 	notifyHandler := notifysvc.NewHandler(notifyStore, broker)
-	notifyHandler.SubscribeNATS(broker)        // cross-instance notification delivery
+	notifyHandler.SubscribeNATS(broker)                  // cross-instance notification delivery
 	notifyHandler.SubscribeFleetEvents(broker, subStore) // event → notification pipeline
 
 	subHandler := subsvc.NewHandler(subStore)

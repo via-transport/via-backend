@@ -2,6 +2,7 @@ package fleetsvc
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -37,6 +38,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/vehicles/{id}/status", h.UpdateVehicleStatus)
 	mux.HandleFunc("PUT /api/v1/vehicles/{id}/location", h.UpdateVehicleLocation)
 	mux.HandleFunc("PUT /api/v1/vehicles/{id}/assign", h.AssignDriver)
+	mux.HandleFunc("PUT /api/v1/vehicles/{id}/unassign", h.UnassignDriver)
 
 	// Drivers
 	mux.HandleFunc("GET /api/v1/drivers", h.ListDrivers)
@@ -131,7 +133,6 @@ func (h *Handler) CreateVehicle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errBody("create failed"))
 		return
 	}
-	h.fanoutVehicleChange(v.FleetID, v.ID, "vehicle_created")
 	writeJSON(w, http.StatusCreated, v)
 }
 
@@ -167,6 +168,9 @@ func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Merge fields.
+	previousStatus := existing.Status
+	previousIsActive := existing.IsActive
+	statusTransitionRequested := false
 	if update.RegistrationNumber != "" {
 		existing.RegistrationNumber = update.RegistrationNumber
 	}
@@ -179,15 +183,31 @@ func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 	if update.Status != "" {
 		existing.Status = update.Status
 	}
-	if update.StatusMessage != "" {
+	if _, ok := rawFields["status_message"]; ok {
 		existing.StatusMessage = update.StatusMessage
+	}
+	if _, ok := rawFields["status"]; ok {
+		statusTransitionRequested = true
 	}
 	if update.Capacity > 0 {
 		existing.Capacity = update.Capacity
 	}
+	if _, ok := rawFields["current_route_id"]; ok {
+		existing.CurrentRouteID = update.CurrentRouteID
+	}
+	if _, ok := rawFields["driver_id"]; ok {
+		existing.DriverID = update.DriverID
+	}
+	if _, ok := rawFields["driver_name"]; ok {
+		existing.DriverName = update.DriverName
+	}
+	if _, ok := rawFields["driver_phone"]; ok {
+		existing.DriverPhone = update.DriverPhone
+	}
 	// Only update IsActive if explicitly present in the request body.
 	if _, ok := rawFields["is_active"]; ok {
 		existing.IsActive = update.IsActive
+		statusTransitionRequested = true
 	}
 	existing.LastUpdated = time.Now().UTC()
 
@@ -195,7 +215,15 @@ func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
 		return
 	}
-	h.fanoutVehicleChange(existing.FleetID, existing.ID, "vehicle_updated")
+	if statusTransitionRequested &&
+		(previousStatus != existing.Status || previousIsActive != existing.IsActive) {
+		h.fanoutVehicleChange(
+			existing.FleetID,
+			existing.ID,
+			"vehicle_status_changed",
+			buildVehicleStatusMessage(existing),
+		)
+	}
 	writeJSON(w, http.StatusOK, existing)
 }
 
@@ -210,7 +238,6 @@ func (h *Handler) DeleteVehicle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
 		return
 	}
-	h.fanoutVehicleChange(fleetID, vehicleID, "vehicle_deleted")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -241,7 +268,12 @@ func (h *Handler) UpdateVehicleStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
 		return
 	}
-	h.fanoutVehicleChange(v.FleetID, v.ID, "vehicle_status_changed")
+	h.fanoutVehicleChange(
+		v.FleetID,
+		v.ID,
+		"vehicle_status_changed",
+		buildVehicleStatusMessage(v),
+	)
 	writeJSON(w, http.StatusOK, v)
 }
 
@@ -283,15 +315,50 @@ func (h *Handler) AssignDriver(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
+	if strings.TrimSpace(body.FleetID) == "" || strings.TrimSpace(body.DriverID) == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("fleet_id and driver_id required"))
+		return
+	}
 
 	v, err := h.store.GetVehicle(r.Context(), body.FleetID, vehicleID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
 		return
 	}
+	previousDriverID := strings.TrimSpace(v.DriverID)
+	if previousDriverID != "" && !strings.EqualFold(previousDriverID, body.DriverID) {
+		if previousDriver, derr := h.store.GetDriver(r.Context(), body.FleetID, previousDriverID); derr == nil {
+			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
+			for _, id := range previousDriver.AssignedVehicleIDs {
+				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
+					filtered = append(filtered, id)
+				}
+			}
+			previousDriver.AssignedVehicleIDs = filtered
+			previousDriver.UpdatedAt = time.Now().UTC()
+			_ = h.store.PutDriver(r.Context(), previousDriver)
+		}
+	}
+
+	driverDetails, derr := h.store.GetDriver(r.Context(), body.FleetID, body.DriverID)
+	if derr != nil {
+		writeJSON(w, http.StatusNotFound, errBody("driver not found"))
+		return
+	}
+	if strings.TrimSpace(body.DriverName) == "" {
+		body.DriverName = driverDetails.FullName
+	}
+	if strings.TrimSpace(body.DriverPhone) == "" {
+		body.DriverPhone = driverDetails.Phone
+	}
+
 	v.DriverID = body.DriverID
 	v.DriverName = body.DriverName
 	v.DriverPhone = body.DriverPhone
+	if strings.TrimSpace(v.StatusMessage) == "" ||
+		strings.EqualFold(strings.TrimSpace(v.StatusMessage), "driver unassigned by owner") {
+		v.StatusMessage = "Driver assigned"
+	}
 	v.LastUpdated = time.Now().UTC()
 
 	if err := h.store.PutVehicle(r.Context(), v); err != nil {
@@ -300,18 +367,74 @@ func (h *Handler) AssignDriver(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Also update the driver's assigned vehicles.
-	if body.DriverID != "" {
-		d, derr := h.store.GetDriver(r.Context(), body.FleetID, body.DriverID)
-		if derr == nil {
-			if !contains(d.AssignedVehicleIDs, vehicleID) {
-				d.AssignedVehicleIDs = append(d.AssignedVehicleIDs, vehicleID)
-				d.UpdatedAt = time.Now().UTC()
-				_ = h.store.PutDriver(r.Context(), d)
+	if !contains(driverDetails.AssignedVehicleIDs, vehicleID) {
+		driverDetails.AssignedVehicleIDs = append(driverDetails.AssignedVehicleIDs, vehicleID)
+		driverDetails.UpdatedAt = time.Now().UTC()
+		_ = h.store.PutDriver(r.Context(), driverDetails)
+	}
+
+	h.fanoutVehicleChange(
+		v.FleetID,
+		v.ID,
+		"driver_assigned",
+		buildDriverAssignmentMessage(v),
+	)
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (h *Handler) UnassignDriver(w http.ResponseWriter, r *http.Request) {
+	vehicleID := r.PathValue("id")
+	var body struct {
+		FleetID string `json:"fleet_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
+		return
+	}
+	if strings.TrimSpace(body.FleetID) == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required"))
+		return
+	}
+
+	v, err := h.store.GetVehicle(r.Context(), body.FleetID, vehicleID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+		return
+	}
+
+	previousDriverID := strings.TrimSpace(v.DriverID)
+	unassignmentMessage := buildDriverUnassignmentMessage(v)
+	if previousDriverID != "" {
+		if previousDriver, derr := h.store.GetDriver(r.Context(), body.FleetID, previousDriverID); derr == nil {
+			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
+			for _, id := range previousDriver.AssignedVehicleIDs {
+				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
+					filtered = append(filtered, id)
+				}
 			}
+			previousDriver.AssignedVehicleIDs = filtered
+			previousDriver.UpdatedAt = time.Now().UTC()
+			_ = h.store.PutDriver(r.Context(), previousDriver)
 		}
 	}
 
-	h.fanoutVehicleChange(v.FleetID, v.ID, "driver_assigned")
+	v.DriverID = ""
+	v.DriverName = ""
+	v.DriverPhone = ""
+	v.StatusMessage = "Driver unassigned by owner"
+	v.LastUpdated = time.Now().UTC()
+
+	if err := h.store.PutVehicle(r.Context(), v); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
+		return
+	}
+
+	h.fanoutVehicleChange(
+		v.FleetID,
+		v.ID,
+		"driver_unassigned",
+		unassignmentMessage,
+	)
 	writeJSON(w, http.StatusOK, v)
 }
 
@@ -602,17 +725,103 @@ func (h *Handler) MarkNoticeRead(w http.ResponseWriter, r *http.Request) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func (h *Handler) fanoutVehicleChange(fleetID, vehicleID, event string) {
+func (h *Handler) fanoutVehicleChange(
+	fleetID, vehicleID, event string,
+	messageParts ...string,
+) {
 	subject := "fleet." + fleetID + ".vehicle." + vehicleID + ".ops." + event
-	body, _ := json.Marshal(map[string]string{
+	payload := map[string]string{
 		"fleet_id":   fleetID,
 		"vehicle_id": vehicleID,
 		"event":      event,
 		"timestamp":  time.Now().UTC().Format(time.RFC3339),
-	})
+	}
+	if len(messageParts) > 0 {
+		normalizedMessage := strings.TrimSpace(messageParts[0])
+		if normalizedMessage != "" {
+			payload["message"] = normalizedMessage
+		}
+	}
+	body, _ := json.Marshal(payload)
 	if err := h.broker.Publish(subject, body); err != nil {
 		log.Printf("[fleet] fanout %s: %v", subject, err)
 	}
+}
+
+func buildVehicleStatusMessage(v *Vehicle) string {
+	if v == nil {
+		return "Vehicle status updated"
+	}
+	vehicleLabel := vehicleDisplayLabel(v)
+	statusLabel := humanizeToken(v.Status)
+	normalizedMessage := strings.TrimSpace(v.StatusMessage)
+	if normalizedMessage == "" || strings.EqualFold(normalizedMessage, statusLabel) {
+		return fmt.Sprintf("%s status updated to %s", vehicleLabel, statusLabel)
+	}
+	return fmt.Sprintf("%s status updated to %s: %s", vehicleLabel, statusLabel, normalizedMessage)
+}
+
+func buildDriverAssignmentMessage(v *Vehicle) string {
+	if v == nil {
+		return "Driver assigned"
+	}
+	driverLabel := strings.TrimSpace(v.DriverName)
+	if driverLabel == "" {
+		driverLabel = strings.TrimSpace(v.DriverID)
+	}
+	if driverLabel == "" {
+		driverLabel = "Driver"
+	}
+	return fmt.Sprintf("%s assigned to %s", driverLabel, vehicleDisplayLabel(v))
+}
+
+func buildDriverUnassignmentMessage(v *Vehicle) string {
+	if v == nil {
+		return "Driver unassigned"
+	}
+	driverLabel := strings.TrimSpace(v.DriverName)
+	if driverLabel == "" {
+		driverLabel = strings.TrimSpace(v.DriverID)
+	}
+	if driverLabel == "" {
+		driverLabel = "Driver"
+	}
+	return fmt.Sprintf("%s unassigned from %s", driverLabel, vehicleDisplayLabel(v))
+}
+
+func vehicleDisplayLabel(v *Vehicle) string {
+	if v == nil {
+		return "vehicle"
+	}
+	baseLabel := strings.TrimSpace(v.RegistrationNumber)
+	if baseLabel == "" {
+		baseLabel = strings.TrimSpace(v.ID)
+	}
+	if baseLabel == "" {
+		baseLabel = "vehicle"
+	}
+	routeID := strings.TrimSpace(v.CurrentRouteID)
+	if routeID == "" {
+		return strings.ToUpper(baseLabel)
+	}
+	return fmt.Sprintf("%s (%s)", strings.ToUpper(baseLabel), routeID)
+}
+
+func humanizeToken(value string) string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return "updated"
+	}
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+	parts := strings.Fields(normalized)
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		lower := strings.ToLower(part)
+		parts[i] = strings.ToUpper(lower[:1]) + lower[1:]
+	}
+	return strings.Join(parts, " ")
 }
 
 func (h *Handler) findVehicleAnyFleet(r *http.Request, vehicleID string) *Vehicle {

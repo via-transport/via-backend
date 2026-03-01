@@ -105,6 +105,9 @@ func (h *Handler) createNotificationsForEvent(
 	subStore subsvc.SubStore,
 	fleetID, vehicleID, eventType, message, timestamp string,
 ) {
+	if !shouldCreateNotificationForEvent(eventType) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -228,53 +231,82 @@ func shouldNotifyForEvent(prefs subsvc.SubPrefs, eventType string) bool {
 	return prefs.NotifyOnEvent
 }
 
+func shouldCreateNotificationForEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(strings.TrimPrefix(eventType, "event_"))) {
+	case "vehicle_updated":
+		return false
+	default:
+		return true
+	}
+}
+
 // eventToNotificationText converts a raw event type string into a human-readable
 // title and body for the notification.
 func eventToNotificationText(eventType, vehicleID, message string) (title, body string) {
 	// Strip "event_" prefix from fanout subject naming.
 	clean := strings.TrimPrefix(eventType, "event_")
 	clean = strings.ToLower(clean)
+	vehicleLabel := "This vehicle"
+	if strings.TrimSpace(vehicleID) != "" {
+		vehicleLabel = fmt.Sprintf("Vehicle %s", strings.TrimSpace(vehicleID))
+	}
 
 	switch clean {
 	case "trip_started":
 		title = "Trip Started"
-		body = fmt.Sprintf("Vehicle %s has started its trip.", vehicleID)
+		body = fmt.Sprintf("%s has started its trip.", vehicleLabel)
 	case "trip_completed":
 		title = "Trip Completed"
-		body = fmt.Sprintf("Vehicle %s has completed its trip.", vehicleID)
+		body = fmt.Sprintf("%s has completed its trip.", vehicleLabel)
 	case "breakdown":
 		title = "Vehicle Breakdown"
-		body = fmt.Sprintf("Vehicle %s has reported a breakdown.", vehicleID)
+		body = fmt.Sprintf("%s has reported a breakdown.", vehicleLabel)
 	case "delay_minor", "delay_major":
 		severity := "minor"
 		if clean == "delay_major" {
 			severity = "major"
 		}
 		title = "Vehicle Delayed"
-		body = fmt.Sprintf("Vehicle %s is experiencing a %s delay.", vehicleID, severity)
+		body = fmt.Sprintf("%s is experiencing a %s delay.", vehicleLabel, severity)
 	case "route_updated":
 		title = "Route Updated"
-		body = fmt.Sprintf("Vehicle %s has updated its route.", vehicleID)
+		body = fmt.Sprintf("%s has updated its route.", vehicleLabel)
 	case "emergency_stop":
 		title = "Emergency Stop"
-		body = fmt.Sprintf("Vehicle %s has made an emergency stop.", vehicleID)
+		body = fmt.Sprintf("%s has made an emergency stop.", vehicleLabel)
 	case "tea_break":
 		title = "Driver Break"
-		body = fmt.Sprintf("Vehicle %s driver is taking a break.", vehicleID)
+		body = fmt.Sprintf("%s driver is taking a break.", vehicleLabel)
 	case "passenger_pickup":
 		title = "Passenger Pickup"
-		body = fmt.Sprintf("Vehicle %s is picking up passengers.", vehicleID)
+		body = fmt.Sprintf("%s is picking up passengers.", vehicleLabel)
 	case "passenger_dropoff":
 		title = "Passenger Dropoff"
-		body = fmt.Sprintf("Vehicle %s is dropping off passengers.", vehicleID)
+		body = fmt.Sprintf("%s is dropping off passengers.", vehicleLabel)
+	case "driver_assigned":
+		title = "Driver Assigned"
+		body = fmt.Sprintf("A driver has been assigned to %s.", vehicleLabel)
+	case "driver_unassigned":
+		title = "Driver Unassigned"
+		body = fmt.Sprintf("The current driver has been removed from %s.", vehicleLabel)
+	case "vehicle_removed":
+		title = "Vehicle Removed"
+		body = fmt.Sprintf("%s was removed from active operations.", vehicleLabel)
+	case "vehicle_substituted":
+		title = "Vehicle Substituted"
+		body = fmt.Sprintf("%s now has a substitute vehicle.", vehicleLabel)
+	case "vehicle_status_changed":
+		title = "Status Updated"
+		body = fmt.Sprintf("%s status has changed.", vehicleLabel)
 	default:
 		title = "Vehicle Event"
-		body = fmt.Sprintf("Vehicle %s: %s", vehicleID, clean)
+		body = fmt.Sprintf("%s: %s", vehicleLabel, clean)
 	}
 
-	// Append custom message if provided.
-	if message != "" {
-		body += " — " + message
+	// Prefer the custom message as the notification body when provided so every
+	// client sees the same human-readable wording.
+	if strings.TrimSpace(message) != "" {
+		body = strings.TrimSpace(message)
 	}
 	return
 }

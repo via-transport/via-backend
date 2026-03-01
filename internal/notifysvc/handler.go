@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,14 +45,30 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	fleetID := r.URL.Query().Get("fleet_id")
 	unreadOnly := r.URL.Query().Get("unread") == "true"
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		userID = userIDFromRequest(r)
+	}
 
-	// If fleet_id is provided, return all notifications for that fleet.
-	if fleetID != "" {
-		notifs, err := h.store.ListForFleet(r.Context(), fleetID, unreadOnly)
+	// If user_id is provided, prefer the user-specific view and optionally
+	// filter the result down to a single fleet. This keeps driver polling scoped
+	// to the current user instead of returning the entire fleet feed.
+	if userID != "" {
+		notifs, err := h.store.ListForUser(r.Context(), userID, unreadOnly)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 			return
 		}
+		if fleetID != "" {
+			filtered := make([]Notification, 0, len(notifs))
+			for _, notif := range notifs {
+				if notif.FleetID == fleetID {
+					filtered = append(filtered, notif)
+				}
+			}
+			notifs = filtered
+		}
+		notifs = filterLowSignalNotifications(notifs)
 		if notifs == nil {
 			notifs = []Notification{}
 		}
@@ -62,20 +79,17 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Otherwise, return notifications for a specific user.
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		userID = userIDFromRequest(r)
-	}
-	if userID == "" {
+	// If no user_id is provided, return the fleet feed.
+	if fleetID == "" {
 		writeJSON(w, http.StatusBadRequest, errBody("user_id or fleet_id required"))
 		return
 	}
-	notifs, err := h.store.ListForUser(r.Context(), userID, unreadOnly)
+	notifs, err := h.store.ListForFleet(r.Context(), fleetID, unreadOnly)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
+	notifs = filterLowSignalNotifications(notifs)
 	if notifs == nil {
 		notifs = []Notification{}
 	}
@@ -83,6 +97,35 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return notifs[i].CreatedAt.After(notifs[j].CreatedAt)
 	})
 	writeJSON(w, http.StatusOK, notifs)
+}
+
+func filterLowSignalNotifications(notifs []Notification) []Notification {
+	if len(notifs) == 0 {
+		return notifs
+	}
+	filtered := make([]Notification, 0, len(notifs))
+	for _, notif := range notifs {
+		eventType := strings.ToLower(strings.TrimSpace(notif.Data["event_type"]))
+		title := strings.ToLower(strings.TrimSpace(notif.Title))
+		body := strings.ToLower(strings.TrimSpace(notif.Body))
+		if eventType == "vehicle_updated" {
+			continue
+		}
+		if (eventType == "driver_assigned" || eventType == "driver_unassigned") &&
+			title == "vehicle event" {
+			continue
+		}
+		if eventType == "driver_assigned" &&
+			strings.HasPrefix(body, "a driver has been assigned to vehicle ") {
+			continue
+		}
+		if eventType == "driver_unassigned" &&
+			strings.HasPrefix(body, "the current driver has been removed from vehicle ") {
+			continue
+		}
+		filtered = append(filtered, notif)
+	}
+	return filtered
 }
 
 // Create sends a notification to a user (also pushes via WebSocket).

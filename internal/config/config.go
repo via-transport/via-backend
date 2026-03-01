@@ -73,6 +73,10 @@ type Config struct {
 	// Store backend: "postgres" or "nats" (default postgres)
 	StoreBackend string
 
+	// Demo seed data
+	SeedDemoFleet   bool
+	SeedDemoFleetID string
+
 	// General
 	Environment string
 	Release     string
@@ -139,6 +143,10 @@ func Load() Config {
 
 		// Store
 		StoreBackend: envStr("STORE_BACKEND", "postgres"),
+
+		// Demo seed
+		SeedDemoFleet:   envBool("SEED_DEMO_FLEET", true),
+		SeedDemoFleetID: envStr("VIA_FLEET_ID", "school-west"),
 
 		// General
 		Environment: envStr("ENVIRONMENT", "development"),
