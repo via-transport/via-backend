@@ -151,6 +151,9 @@ func main() {
 		if err := fleetsvc.EnsureDemoFleet(seedFleetCtx, fleetStore, cfg.SeedDemoFleetID); err != nil {
 			log.Printf("[main] demo fleet seed warning: %v", err)
 		}
+		if err := authsvc.EnsureDemoPassenger(seedFleetCtx, authStore, cfg.SeedDemoFleetID); err != nil {
+			log.Printf("[main] demo passenger seed warning: %v", err)
+		}
 		seedFleetCancel()
 	}
 

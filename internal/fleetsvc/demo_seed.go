@@ -6,21 +6,28 @@ import (
 )
 
 const (
-	demoVehicleID         = "veh_001"
-	demoDriverID          = "drv_001"
-	demoVehicleRegNo      = "ND-4521"
-	demoVehicleType       = "bus"
-	demoVehicleService    = "school"
-	demoVehicleStatus     = "en_route"
-	demoVehicleStatusNote = "Running on schedule"
-	demoRouteID           = "route_010"
-	demoDriverName        = "Kamal Perera"
-	demoDriverEmail       = "kamal.perera@via.local"
-	demoDriverPhone       = "+94770001122"
+	demoPrimaryVehicleID         = "veh_001"
+	demoStandbyVehicleID         = "veh_002"
+	demoDriverID                 = "drv_001"
+	demoPrimaryVehicleRegNo      = "ND-4521"
+	demoPrimaryVehicleType       = "bus"
+	demoPrimaryVehicleService    = "school_transport"
+	demoPrimaryVehicleStatus     = "en_route"
+	demoPrimaryVehicleStatusNote = "Running on schedule"
+	demoPrimaryRouteID           = "route_010"
+	demoStandbyVehicleRegNo      = "CB-2408"
+	demoStandbyVehicleType       = "van"
+	demoStandbyVehicleService    = "corporate_shuttle"
+	demoStandbyVehicleStatus     = "on_time"
+	demoStandbyVehicleStatusNote = "Standby vehicle ready"
+	demoStandbyRouteID           = "route_204"
+	demoDriverName               = "Kamal Perera"
+	demoDriverEmail              = "kamal.perera@via.local"
+	demoDriverPhone              = "+94770001122"
 )
 
-// EnsureDemoFleet provisions a stable demo driver/vehicle pair in the backend
-// so all apps can point at the same shared records instead of local mocks.
+// EnsureDemoFleet provisions a stable demo fleet in the backend so all apps
+// can point at the same shared records instead of local-only mock data.
 func EnsureDemoFleet(ctx context.Context, store FleetStore, fleetID string) error {
 	if fleetID == "" {
 		return nil
@@ -33,7 +40,11 @@ func EnsureDemoFleet(ctx context.Context, store FleetStore, fleetID string) erro
 		return err
 	}
 
-	if err := ensureDemoVehicle(ctx, store, fleetID, now, driver); err != nil {
+	if err := ensurePrimaryDemoVehicle(ctx, store, fleetID, now, driver); err != nil {
+		return err
+	}
+
+	if err := ensureStandbyDemoVehicle(ctx, store, fleetID, now); err != nil {
 		return err
 	}
 
@@ -54,7 +65,7 @@ func ensureDemoDriver(
 			FullName:           demoDriverName,
 			Phone:              demoDriverPhone,
 			FleetID:            fleetID,
-			AssignedVehicleIDs: []string{demoVehicleID},
+			AssignedVehicleIDs: []string{demoPrimaryVehicleID},
 			IsActive:           true,
 			CreatedAt:          now,
 			UpdatedAt:          now,
@@ -82,8 +93,11 @@ func ensureDemoDriver(
 		driver.IsActive = true
 		changed = true
 	}
-	if !containsDemoID(driver.AssignedVehicleIDs, demoVehicleID) {
-		driver.AssignedVehicleIDs = append(driver.AssignedVehicleIDs, demoVehicleID)
+	if !containsDemoID(driver.AssignedVehicleIDs, demoPrimaryVehicleID) {
+		driver.AssignedVehicleIDs = append(
+			driver.AssignedVehicleIDs,
+			demoPrimaryVehicleID,
+		)
 		changed = true
 	}
 
@@ -100,24 +114,24 @@ func ensureDemoDriver(
 	return driver, nil
 }
 
-func ensureDemoVehicle(
+func ensurePrimaryDemoVehicle(
 	ctx context.Context,
 	store FleetStore,
 	fleetID string,
 	now time.Time,
 	driver *Driver,
 ) error {
-	vehicle, err := store.GetVehicle(ctx, fleetID, demoVehicleID)
+	vehicle, err := store.GetVehicle(ctx, fleetID, demoPrimaryVehicleID)
 	if err != nil {
 		vehicle = &Vehicle{
-			ID:                 demoVehicleID,
-			RegistrationNumber: demoVehicleRegNo,
-			Type:               demoVehicleType,
-			ServiceType:        demoVehicleService,
+			ID:                 demoPrimaryVehicleID,
+			RegistrationNumber: demoPrimaryVehicleRegNo,
+			Type:               demoPrimaryVehicleType,
+			ServiceType:        demoPrimaryVehicleService,
 			IsActive:           true,
-			Status:             demoVehicleStatus,
-			StatusMessage:      demoVehicleStatusNote,
-			CurrentRouteID:     demoRouteID,
+			Status:             demoPrimaryVehicleStatus,
+			StatusMessage:      demoPrimaryVehicleStatusNote,
+			CurrentRouteID:     demoPrimaryRouteID,
 			DriverID:           driver.ID,
 			DriverName:         driver.FullName,
 			DriverPhone:        driver.Phone,
@@ -138,27 +152,27 @@ func ensureDemoVehicle(
 
 	changed := false
 	if vehicle.RegistrationNumber == "" {
-		vehicle.RegistrationNumber = demoVehicleRegNo
+		vehicle.RegistrationNumber = demoPrimaryVehicleRegNo
 		changed = true
 	}
 	if vehicle.Type == "" {
-		vehicle.Type = demoVehicleType
+		vehicle.Type = demoPrimaryVehicleType
 		changed = true
 	}
-	if vehicle.ServiceType == "" {
-		vehicle.ServiceType = demoVehicleService
+	if shouldNormalizeServiceType(vehicle.ServiceType, demoPrimaryVehicleService, "school") {
+		vehicle.ServiceType = demoPrimaryVehicleService
 		changed = true
 	}
 	if vehicle.Status == "" {
-		vehicle.Status = demoVehicleStatus
+		vehicle.Status = demoPrimaryVehicleStatus
 		changed = true
 	}
 	if vehicle.StatusMessage == "" {
-		vehicle.StatusMessage = demoVehicleStatusNote
+		vehicle.StatusMessage = demoPrimaryVehicleStatusNote
 		changed = true
 	}
 	if vehicle.CurrentRouteID == "" {
-		vehicle.CurrentRouteID = demoRouteID
+		vehicle.CurrentRouteID = demoPrimaryRouteID
 		changed = true
 	}
 	if !vehicle.IsActive {
@@ -204,6 +218,119 @@ func ensureDemoVehicle(
 	}
 
 	return nil
+}
+
+func ensureStandbyDemoVehicle(
+	ctx context.Context,
+	store FleetStore,
+	fleetID string,
+	now time.Time,
+) error {
+	vehicle, err := store.GetVehicle(ctx, fleetID, demoStandbyVehicleID)
+	if err != nil {
+		vehicle = &Vehicle{
+			ID:                 demoStandbyVehicleID,
+			RegistrationNumber: demoStandbyVehicleRegNo,
+			Type:               demoStandbyVehicleType,
+			ServiceType:        demoStandbyVehicleService,
+			IsActive:           true,
+			Status:             demoStandbyVehicleStatus,
+			StatusMessage:      demoStandbyVehicleStatusNote,
+			CurrentRouteID:     demoStandbyRouteID,
+			FleetID:            fleetID,
+			Capacity:           18,
+			CurrentLocation: &VehicleLocation{
+				Latitude:  6.9102,
+				Longitude: 79.8848,
+				Heading:   180,
+				Speed:     0,
+				Timestamp: now,
+			},
+			LastUpdated: now,
+			CreatedAt:   now,
+		}
+		return store.PutVehicle(ctx, vehicle)
+	}
+
+	changed := false
+	if vehicle.RegistrationNumber == "" {
+		vehicle.RegistrationNumber = demoStandbyVehicleRegNo
+		changed = true
+	}
+	if vehicle.Type == "" {
+		vehicle.Type = demoStandbyVehicleType
+		changed = true
+	}
+	if shouldNormalizeServiceType(
+		vehicle.ServiceType,
+		demoStandbyVehicleService,
+		"office",
+		"corporate",
+	) {
+		vehicle.ServiceType = demoStandbyVehicleService
+		changed = true
+	}
+	if vehicle.Status == "" {
+		vehicle.Status = demoStandbyVehicleStatus
+		changed = true
+	}
+	if vehicle.StatusMessage == "" {
+		vehicle.StatusMessage = demoStandbyVehicleStatusNote
+		changed = true
+	}
+	if vehicle.CurrentRouteID == "" {
+		vehicle.CurrentRouteID = demoStandbyRouteID
+		changed = true
+	}
+	if !vehicle.IsActive {
+		vehicle.IsActive = true
+		changed = true
+	}
+	if vehicle.Capacity <= 0 {
+		vehicle.Capacity = 18
+		changed = true
+	}
+	if vehicle.CurrentLocation == nil {
+		vehicle.CurrentLocation = &VehicleLocation{
+			Latitude:  6.9102,
+			Longitude: 79.8848,
+			Heading:   180,
+			Speed:     0,
+			Timestamp: now,
+		}
+		changed = true
+	}
+	if vehicle.DriverID != "" || vehicle.DriverName != "" || vehicle.DriverPhone != "" {
+		vehicle.DriverID = ""
+		vehicle.DriverName = ""
+		vehicle.DriverPhone = ""
+		changed = true
+	}
+
+	if changed {
+		if vehicle.CreatedAt.IsZero() {
+			vehicle.CreatedAt = now
+		}
+		vehicle.LastUpdated = now
+		return store.PutVehicle(ctx, vehicle)
+	}
+
+	return nil
+}
+
+func shouldNormalizeServiceType(current, desired string, aliases ...string) bool {
+	if current == desired {
+		return false
+	}
+	if current == "" {
+		return true
+	}
+	for _, alias := range aliases {
+		if current == alias {
+			return true
+		}
+	}
+	return false
 }
 
 func containsDemoID(ids []string, target string) bool {
