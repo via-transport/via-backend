@@ -338,6 +338,16 @@ func (h *Handler) GetDriver(w http.ResponseWriter, r *http.Request) {
 	driverID := r.PathValue("id")
 	fleetID := r.URL.Query().Get("fleet_id")
 
+	if fleetID == "" {
+		d := h.findDriverAnyFleet(r, driverID)
+		if d == nil {
+			writeJSON(w, http.StatusNotFound, errBody("driver not found"))
+			return
+		}
+		writeJSON(w, http.StatusOK, d)
+		return
+	}
+
 	d, err := h.store.GetDriver(r.Context(), fleetID, driverID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errBody("driver not found"))
@@ -394,10 +404,20 @@ func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 		fleetID = r.URL.Query().Get("fleet_id")
 	}
 
-	existing, err := h.store.GetDriver(r.Context(), fleetID, driverID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("driver not found"))
-		return
+	var existing *Driver
+	if fleetID == "" {
+		existing = h.findDriverAnyFleet(r, driverID)
+		if existing == nil {
+			writeJSON(w, http.StatusNotFound, errBody("driver not found"))
+			return
+		}
+		fleetID = existing.FleetID
+	} else {
+		existing, err = h.store.GetDriver(r.Context(), fleetID, driverID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, errBody("driver not found"))
+			return
+		}
 	}
 
 	if update.FullName != "" {
@@ -413,6 +433,9 @@ func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 	if _, ok := rawFields["is_active"]; ok {
 		existing.IsActive = update.IsActive
 	}
+	if _, ok := rawFields["assigned_vehicle_ids"]; ok {
+		existing.AssignedVehicleIDs = update.AssignedVehicleIDs
+	}
 	existing.UpdatedAt = time.Now().UTC()
 
 	if err := h.store.PutDriver(r.Context(), existing); err != nil {
@@ -426,8 +449,12 @@ func (h *Handler) DeleteDriver(w http.ResponseWriter, r *http.Request) {
 	driverID := r.PathValue("id")
 	fleetID := r.URL.Query().Get("fleet_id")
 	if fleetID == "" {
-		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required"))
-		return
+		existing := h.findDriverAnyFleet(r, driverID)
+		if existing == nil {
+			writeJSON(w, http.StatusNotFound, errBody("driver not found"))
+			return
+		}
+		fleetID = existing.FleetID
 	}
 	if err := h.store.DeleteDriver(r.Context(), fleetID, driverID); err != nil {
 		writeJSON(w, http.StatusNotFound, errBody("driver not found"))
@@ -594,6 +621,20 @@ func (h *Handler) findVehicleAnyFleet(r *http.Request, vehicleID string) *Vehicl
 		return nil
 	}
 	return v
+}
+
+func (h *Handler) findDriverAnyFleet(r *http.Request, driverID string) *Driver {
+	drivers, err := h.store.ListDrivers(r.Context(), "")
+	if err != nil {
+		return nil
+	}
+	for i := range drivers {
+		if strings.EqualFold(drivers[i].ID, driverID) {
+			driver := drivers[i]
+			return &driver
+		}
+	}
+	return nil
 }
 
 func contains(ss []string, s string) bool {
