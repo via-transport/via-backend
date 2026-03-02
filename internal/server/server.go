@@ -20,9 +20,11 @@ import (
 	"via-backend/internal/messaging"
 	"via-backend/internal/middleware"
 	"via-backend/internal/notifysvc"
+	"via-backend/internal/requestsvc"
 	viasentry "via-backend/internal/sentry"
 	"via-backend/internal/service"
 	"via-backend/internal/subsvc"
+	"via-backend/internal/tenantsvc"
 	"via-backend/internal/tracing"
 )
 
@@ -41,8 +43,11 @@ func New(
 	appCache *appcache.Cache,
 	authCfg auth.MiddlewareConfig,
 	authHandler *authsvc.Handler,
+	tenantHandler *tenantsvc.Handler,
+	tenantPolicy *tenantsvc.Policy,
 	fleetHandler *fleetsvc.Handler,
 	notifyHandler *notifysvc.Handler,
+	requestHandler *requestsvc.Handler,
 	subHandler *subsvc.Handler,
 ) *Server {
 	mux := http.NewServeMux()
@@ -52,15 +57,18 @@ func New(
 	mux.HandleFunc("/debug/cache/stats", appcache.StatsHandler(appCache))
 
 	// --- Legacy API routes (GPS, trip, events, websocket) ---
-	mux.HandleFunc("/v1/gps/update", handler.GPSIngest(gpsSvc))
-	mux.HandleFunc("/v1/trip/start", handler.TripStart(eventSvc))
-	mux.HandleFunc("/v1/events/publish", handler.EventPublish(eventSvc))
-	mux.HandleFunc("/ws", handler.WSFanout(broker, gpsCache, cfg))
+	mux.HandleFunc("/v1/gps/update", handler.GPSIngest(gpsSvc, tenantPolicy))
+	mux.HandleFunc("/v1/trip/start", handler.TripStart(eventSvc, tenantPolicy))
+	mux.HandleFunc("/v1/events/publish", handler.EventPublish(eventSvc, tenantPolicy))
+	mux.HandleFunc("/ws", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy))
+	mux.HandleFunc("GET /api/v1/vehicles/{id}/stream", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy))
 
 	// --- Microservice routes ---
 	authHandler.Mount(mux)
+	tenantHandler.Mount(mux)
 	fleetHandler.Mount(mux)
 	notifyHandler.Mount(mux)
+	requestHandler.Mount(mux)
 	subHandler.Mount(mux)
 
 	// Middleware stack (outermost → innermost):

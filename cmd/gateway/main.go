@@ -22,10 +22,12 @@ import (
 	"via-backend/internal/fleetsvc"
 	"via-backend/internal/messaging"
 	"via-backend/internal/notifysvc"
+	"via-backend/internal/requestsvc"
 	viasentry "via-backend/internal/sentry"
 	"via-backend/internal/server"
 	"via-backend/internal/service"
 	"via-backend/internal/subsvc"
+	"via-backend/internal/tenantsvc"
 	"via-backend/internal/tracing"
 )
 
@@ -90,6 +92,8 @@ func main() {
 	var fleetStore fleetsvc.FleetStore
 	var notifyStore notifysvc.NotifStore
 	var subStore subsvc.SubStore
+	var tenantStore tenantsvc.Store
+	var driverRequestStore requestsvc.Store
 
 	if cfg.StoreBackend == "nats" {
 		log.Println("[main] store backend: NATS KV")
@@ -125,10 +129,20 @@ func main() {
 		if err != nil {
 			log.Fatalf("[main] %v", err)
 		}
+		driverRequestsKV, err := broker.ProvisionKV("VIA_DRIVER_REQUESTS", "Driver access requests")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
+		tenantsKV, err := broker.ProvisionKV("VIA_TENANTS", "Tenant plans and billing state")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
 		authStore = authsvc.NewStore(usersKV, emailsKV)
 		fleetStore = fleetsvc.NewStore(vehiclesKV, driversKV, eventsKV, noticesKV, appCache)
 		notifyStore = notifysvc.NewStore(notificationsKV)
 		subStore = subsvc.NewStore(subscriptionsKV)
+		tenantStore = tenantsvc.NewStore(tenantsKV)
+		driverRequestStore = requestsvc.NewStore(driverRequestsKV)
 	} else {
 		log.Println("[main] store backend: PostgreSQL")
 		pgCfg := database.ConfigFromEnv()
@@ -144,15 +158,25 @@ func main() {
 		fleetStore = fleetsvc.NewPGStore(pgPool)
 		notifyStore = notifysvc.NewPGStore(pgPool)
 		subStore = subsvc.NewPGStore(pgPool)
+		tenantStore = tenantsvc.NewPGStore(pgPool)
+		driverRequestStore = requestsvc.NewPGStore(pgPool)
 	}
+
+	tenantPolicy := tenantsvc.NewPolicy(tenantStore)
 
 	if cfg.SeedDemoFleet {
 		seedFleetCtx, seedFleetCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := fleetsvc.EnsureDemoFleet(seedFleetCtx, fleetStore, cfg.SeedDemoFleetID); err != nil {
 			log.Printf("[main] demo fleet seed warning: %v", err)
 		}
+		if err := tenantsvc.EnsureDemoTenant(seedFleetCtx, tenantStore, cfg.SeedDemoFleetID); err != nil {
+			log.Printf("[main] demo tenant seed warning: %v", err)
+		}
 		if err := authsvc.EnsureDemoPassenger(seedFleetCtx, authStore, cfg.SeedDemoFleetID); err != nil {
 			log.Printf("[main] demo passenger seed warning: %v", err)
+		}
+		if err := authsvc.EnsureDemoDriver(seedFleetCtx, authStore, cfg.SeedDemoFleetID); err != nil {
+			log.Printf("[main] demo driver seed warning: %v", err)
 		}
 		seedFleetCancel()
 	}
@@ -180,13 +204,16 @@ func main() {
 		return auth.IdentityFromContext(r.Context()).UserID
 	})
 
-	fleetHandler := fleetsvc.NewHandler(fleetStore, broker)
+	tenantHandler := tenantsvc.NewHandler(tenantStore, tenantPolicy)
+
+	fleetHandler := fleetsvc.NewHandler(fleetStore, broker, tenantPolicy)
 
 	notifyHandler := notifysvc.NewHandler(notifyStore, broker)
 	notifyHandler.SubscribeNATS(broker)                  // cross-instance notification delivery
 	notifyHandler.SubscribeFleetEvents(broker, subStore) // event → notification pipeline
 
-	subHandler := subsvc.NewHandler(subStore)
+	subHandler := subsvc.NewHandler(subStore, tenantPolicy)
+	requestHandler := requestsvc.NewHandler(driverRequestStore, fleetStore)
 
 	// 7. Auth / RBAC
 	authCfg := auth.MiddlewareConfig{
@@ -198,7 +225,7 @@ func main() {
 
 	// 8. HTTP server
 	srv := server.New(cfg, gpsSvc, eventSvc, broker, gpsCache, appCache, authCfg,
-		authHandler, fleetHandler, notifyHandler, subHandler)
+		authHandler, tenantHandler, tenantPolicy, fleetHandler, notifyHandler, requestHandler, subHandler)
 
 	go func() {
 		if err := srv.Start(); err != nil {

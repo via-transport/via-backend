@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"via-backend/internal/tenantsvc"
 )
 
 // writeJSON encodes payload as JSON and writes it to w.
@@ -21,4 +23,20 @@ func writeJSON(w http.ResponseWriter, code int, payload any) {
 // writeError writes a JSON error response.
 func writeError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, map[string]string{"error": message})
+}
+
+func writePolicyError(w http.ResponseWriter, err error) bool {
+	pe, ok := tenantsvc.AsPolicyError(err)
+	if !ok {
+		return false
+	}
+	body := map[string]string{
+		"error": pe.Message,
+		"code":  pe.Code,
+	}
+	if pe.PublicMessage != "" {
+		body["public_message"] = pe.PublicMessage
+	}
+	writeJSON(w, pe.HTTPStatus, body)
+	return true
 }

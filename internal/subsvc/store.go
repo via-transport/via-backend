@@ -42,6 +42,31 @@ func (s *Store) Get(ctx context.Context, userID, subID string) (*Subscription, e
 	return &sub, nil
 }
 
+// GetByID retrieves a subscription by ID across all users.
+func (s *Store) GetByID(ctx context.Context, subID string) (*Subscription, error) {
+	keys, err := s.kv.Keys(ctx)
+	if err != nil {
+		if err.Error() == "nats: no keys found" {
+			return nil, err
+		}
+		return nil, err
+	}
+	for _, k := range keys {
+		entry, err := s.kv.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		var sub Subscription
+		if err := json.Unmarshal(entry.Value(), &sub); err != nil {
+			continue
+		}
+		if sub.ID == subID {
+			return &sub, nil
+		}
+	}
+	return nil, fmt.Errorf("subscription not found")
+}
+
 // ListForUser returns all subscriptions for a user.
 func (s *Store) ListForUser(ctx context.Context, userID string) ([]Subscription, error) {
 	keys, err := s.kv.Keys(ctx)
@@ -92,6 +117,36 @@ func (s *Store) ListForVehicle(ctx context.Context, vehicleID string) ([]Subscri
 		if sub.VehicleID == vehicleID && sub.Status == "active" {
 			result = append(result, sub)
 		}
+	}
+	return result, nil
+}
+
+// ListByFleetStatus returns subscriptions filtered by fleet and status.
+func (s *Store) ListByFleetStatus(ctx context.Context, fleetID, status string) ([]Subscription, error) {
+	keys, err := s.kv.Keys(ctx)
+	if err != nil {
+		if err.Error() == "nats: no keys found" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var result []Subscription
+	for _, k := range keys {
+		entry, err := s.kv.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		var sub Subscription
+		if err := json.Unmarshal(entry.Value(), &sub); err != nil {
+			continue
+		}
+		if fleetID != "" && sub.FleetID != fleetID {
+			continue
+		}
+		if status != "" && sub.Status != status {
+			continue
+		}
+		result = append(result, sub)
 	}
 	return result, nil
 }

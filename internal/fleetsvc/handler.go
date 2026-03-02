@@ -14,17 +14,19 @@ import (
 	"github.com/google/uuid"
 
 	"via-backend/internal/messaging"
+	"via-backend/internal/tenantsvc"
 )
 
 // Handler exposes fleet CRUD endpoints.
 type Handler struct {
 	store  FleetStore
 	broker *messaging.Broker
+	policy *tenantsvc.Policy
 }
 
 // NewHandler creates fleet handlers.
-func NewHandler(store FleetStore, broker *messaging.Broker) *Handler {
-	return &Handler{store: store, broker: broker}
+func NewHandler(store FleetStore, broker *messaging.Broker, policy *tenantsvc.Policy) *Handler {
+	return &Handler{store: store, broker: broker, policy: policy}
 }
 
 // Mount registers all fleet routes on the mux.
@@ -127,6 +129,17 @@ func (h *Handler) CreateVehicle(w http.ResponseWriter, r *http.Request) {
 	v.LastUpdated = now
 	if v.Status == "" {
 		v.Status = "idle"
+	}
+	if h.policy != nil {
+		existing, err := h.store.ListVehicles(r.Context(), v.FleetID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errBody("quota lookup failed"))
+			return
+		}
+		if _, err := h.policy.CheckVehicleCreate(r.Context(), v.FleetID, len(existing)); err != nil {
+			writePolicyError(w, err)
+			return
+		}
 	}
 
 	if err := h.store.PutVehicle(r.Context(), &v); err != nil {
@@ -496,6 +509,17 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 	d.CreatedAt = now
 	d.UpdatedAt = now
 	d.IsActive = true
+	if h.policy != nil {
+		existing, err := h.store.ListDrivers(r.Context(), d.FleetID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errBody("quota lookup failed"))
+			return
+		}
+		if _, err := h.policy.CheckDriverCreate(r.Context(), d.FleetID, len(existing)); err != nil {
+			writePolicyError(w, err)
+			return
+		}
+	}
 
 	if err := h.store.PutDriver(r.Context(), &d); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("create failed"))
@@ -863,6 +887,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func errBody(msg string) map[string]string {
 	return map[string]string{"error": msg}
+}
+
+func writePolicyError(w http.ResponseWriter, err error) {
+	if pe, ok := tenantsvc.AsPolicyError(err); ok {
+		body := map[string]string{
+			"error": pe.Message,
+			"code":  pe.Code,
+		}
+		if pe.PublicMessage != "" {
+			body["public_message"] = pe.PublicMessage
+		}
+		writeJSON(w, pe.HTTPStatus, body)
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 }
 
 // parsePagination extracts limit/offset from query params.

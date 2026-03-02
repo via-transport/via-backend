@@ -46,12 +46,29 @@ func (s *PGStore) Get(ctx context.Context, userID, subID string) (*Subscription,
 	return s.scanSub(s.pool.QueryRow(ctx, subSelectSQL+" WHERE id=$1 AND user_id=$2", subID, userID))
 }
 
+func (s *PGStore) GetByID(ctx context.Context, subID string) (*Subscription, error) {
+	return s.scanSub(s.pool.QueryRow(ctx, subSelectSQL+" WHERE id=$1", subID))
+}
+
 func (s *PGStore) ListForUser(ctx context.Context, userID string) ([]Subscription, error) {
 	return s.querySubs(ctx, subSelectSQL+" WHERE user_id=$1 ORDER BY created_at DESC", userID)
 }
 
 func (s *PGStore) ListForVehicle(ctx context.Context, vehicleID string) ([]Subscription, error) {
 	return s.querySubs(ctx, subSelectSQL+" WHERE vehicle_id=$1 AND status='active' ORDER BY created_at DESC", vehicleID)
+}
+
+func (s *PGStore) ListByFleetStatus(ctx context.Context, fleetID, status string) ([]Subscription, error) {
+	if fleetID == "" && status == "" {
+		return s.querySubs(ctx, subSelectSQL+" ORDER BY created_at DESC")
+	}
+	if status == "" {
+		return s.querySubs(ctx, subSelectSQL+" WHERE fleet_id=$1 ORDER BY created_at DESC", fleetID)
+	}
+	if fleetID == "" {
+		return s.querySubs(ctx, subSelectSQL+" WHERE status=$1 ORDER BY created_at DESC", status)
+	}
+	return s.querySubs(ctx, subSelectSQL+" WHERE fleet_id=$1 AND status=$2 ORDER BY created_at DESC", fleetID, status)
 }
 
 func (s *PGStore) Delete(ctx context.Context, userID, subID string) error {

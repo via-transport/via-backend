@@ -1,11 +1,13 @@
 # VIA Backend (Go + NATS)
 
-This service is a lightweight realtime gateway (GPS + fleet events) for fleet tracking.
+This service is the fleet control plane and realtime gateway for tenant-scoped fleet tracking.
 
 ## What it does
 - Receives GPS updates over HTTP (`POST /v1/gps/update`)
 - Receives trip events over HTTP (`POST /v1/trip/start`)
 - Receives generic realtime events over HTTP (`POST /v1/events/publish`)
+- Exposes tenant plan and service-status endpoints (`/api/v1/billing/*`, `/api/v1/service-status`)
+- Exposes passenger join-request approval flow (`/api/v1/join-requests`)
 - Publishes each update to NATS subject:
   - `fleet.<fleet_id>.vehicle.<vehicle_id>.gps`
   - `fleet.<fleet_id>.vehicle.<vehicle_id>.trip.<event>`
@@ -15,6 +17,15 @@ This service is a lightweight realtime gateway (GPS + fleet events) for fleet tr
   - Fleet-wide: subscribe with `fleet_id`
   - Single vehicle: subscribe with `fleet_id` + `vehicle_id`
   - Topic selection: `topic=gps` (default), `topic=trip`, `topic=ops`, or `topic=events`
+- Also exposes a spec-aligned vehicle stream route:
+  - `GET /api/v1/vehicles/{id}/stream?fleet_id=<tenant>`
+- Enforces backend-side quotas:
+  - location publish minimum interval (default `3s`)
+  - event publish hourly cap (default `30/hour`)
+  - trial tenant limits for vehicles, drivers, and active passenger approvals
+- Enforces tenant lifecycle:
+  - `TRIAL -> GRACE -> SUSPENDED`
+  - suspended tenants are blocked from realtime publish/stream paths
 
 ## Run
 1. Start Firebase emulators (for local app sync without internet access):
@@ -65,6 +76,7 @@ ws://localhost:9090/ws?fleet_id=school-west&topic=trip
 ws://localhost:9090/ws?fleet_id=school-west&vehicle_id=veh_001&topic=trip
 ws://localhost:9090/ws?fleet_id=school-west&topic=ops
 ws://localhost:9090/ws?fleet_id=school-west&topic=events
+ws://localhost:9090/api/v1/vehicles/veh_001/stream?fleet_id=school-west
 ```
 
 Publish trip-start event:
@@ -93,4 +105,37 @@ curl -X POST http://localhost:9090/v1/events/publish \
     "event":"driver_assigned",
     "message":"Vehicle assigned to Nimal"
   }'
+```
+
+Create a tenant trial:
+```bash
+curl -X POST http://localhost:9090/api/v1/billing/start-trial \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fleet_id":"school-west",
+    "name":"School West Transport"
+  }'
+```
+
+Read billing plan / service state:
+```bash
+curl "http://localhost:9090/api/v1/billing/plan?fleet_id=school-west"
+curl "http://localhost:9090/api/v1/service-status?fleet_id=school-west"
+```
+
+Passenger join request:
+```bash
+curl -X POST http://localhost:9090/api/v1/join-requests \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id":"psg_001",
+    "fleet_id":"school-west",
+    "vehicle_id":"veh_001"
+  }'
+```
+
+Owner approval:
+```bash
+curl "http://localhost:9090/api/v1/join-requests?fleet_id=school-west&status=pending"
+curl -X POST http://localhost:9090/api/v1/join-requests/<join_request_id>/approve
 ```

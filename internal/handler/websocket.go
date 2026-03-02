@@ -13,6 +13,7 @@ import (
 	"via-backend/internal/config"
 	"via-backend/internal/messaging"
 	"via-backend/internal/model"
+	"via-backend/internal/tenantsvc"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -23,7 +24,7 @@ var wsUpgrader = websocket.Upgrader{
 
 // WSFanout handles GET /ws. It upgrades the connection, subscribes to the
 // requested NATS subjects, and streams messages to the client.
-func WSFanout(broker *messaging.Broker, gpsCache *cache.GPSCache, cfg config.Config) http.HandlerFunc {
+func WSFanout(broker *messaging.Broker, gpsCache *cache.GPSCache, cfg config.Config, policy *tenantsvc.Policy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -32,6 +33,9 @@ func WSFanout(broker *messaging.Broker, gpsCache *cache.GPSCache, cfg config.Con
 
 		fleetID := strings.TrimSpace(r.URL.Query().Get("fleet_id"))
 		vehicleID := strings.TrimSpace(r.URL.Query().Get("vehicle_id"))
+		if vehicleID == "" {
+			vehicleID = strings.TrimSpace(r.PathValue("id"))
+		}
 		topic := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("topic")))
 		if topic == "" {
 			topic = model.TopicGPS
@@ -39,6 +43,15 @@ func WSFanout(broker *messaging.Broker, gpsCache *cache.GPSCache, cfg config.Con
 		if fleetID == "" {
 			writeError(w, http.StatusBadRequest, "fleet_id is required")
 			return
+		}
+		if policy != nil {
+			if _, err := policy.EnsureRealtimeAllowed(r.Context(), fleetID); err != nil {
+				if writePolicyError(w, err) {
+					return
+				}
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 
 		subjects, err := messaging.SubjectsForTopic(topic, fleetID, vehicleID)

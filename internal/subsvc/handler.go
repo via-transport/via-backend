@@ -3,21 +3,24 @@ package subsvc
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"via-backend/internal/auth"
+	"via-backend/internal/tenantsvc"
 )
 
 // Handler provides subscription REST endpoints.
 type Handler struct {
-	store SubStore
+	store  SubStore
+	policy *tenantsvc.Policy
 }
 
 // NewHandler creates a subscription handler.
-func NewHandler(store SubStore) *Handler {
-	return &Handler{store: store}
+func NewHandler(store SubStore, policy *tenantsvc.Policy) *Handler {
+	return &Handler{store: store, policy: policy}
 }
 
 // Mount registers subscription routes.
@@ -28,6 +31,10 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/subscriptions/{id}", h.Update)
 	mux.HandleFunc("DELETE /api/v1/subscriptions/{id}", h.Cancel)
 	mux.HandleFunc("GET /api/v1/subscriptions/vehicle/{vehicleId}", h.ListForVehicle)
+	mux.HandleFunc("POST /api/v1/join-requests", h.CreateJoinRequest)
+	mux.HandleFunc("GET /api/v1/join-requests", h.ListJoinRequests)
+	mux.HandleFunc("POST /api/v1/join-requests/{id}/approve", h.ApproveJoinRequest)
+	mux.HandleFunc("POST /api/v1/join-requests/{id}/deny", h.DenyJoinRequest)
 }
 
 // List returns all subscriptions for a user.
@@ -82,6 +89,9 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if sub.ID == "" {
 		sub.ID = uuid.New().String()
 	}
+	if sub.FleetID == "" {
+		sub.FleetID = strings.TrimSpace(r.URL.Query().Get("fleet_id"))
+	}
 	now := time.Now().UTC()
 	sub.CreatedAt = now
 	sub.UpdatedAt = now
@@ -94,11 +104,118 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.policy != nil && sub.FleetID != "" {
+		active, err := h.store.ListByFleetStatus(r.Context(), sub.FleetID, "active")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errBody("quota lookup failed"))
+			return
+		}
+		if _, err := h.policy.CheckPassengerActivate(r.Context(), sub.FleetID, len(active)); err != nil {
+			writePolicyError(w, err)
+			return
+		}
+	}
+
 	if err := h.store.Put(r.Context(), &sub); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("create failed"))
 		return
 	}
 	writeJSON(w, http.StatusCreated, sub)
+}
+
+// CreateJoinRequest creates a pending passenger access request.
+func (h *Handler) CreateJoinRequest(w http.ResponseWriter, r *http.Request) {
+	var sub Subscription
+	if err := json.NewDecoder(r.Body).Decode(&sub); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
+		return
+	}
+	if sub.UserID == "" {
+		sub.UserID = userIDFromRequest(r)
+	}
+	if sub.UserID == "" || sub.VehicleID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("user_id and vehicle_id required"))
+		return
+	}
+	if sub.ID == "" {
+		sub.ID = uuid.New().String()
+	}
+	now := time.Now().UTC()
+	sub.CreatedAt = now
+	sub.UpdatedAt = now
+	sub.Status = "pending"
+	if sub.Preferences == (SubPrefs{}) {
+		sub.Preferences = SubPrefs{
+			NotifyOnArrival: true,
+			NotifyOnDelay:   true,
+			NotifyOnEvent:   true,
+		}
+	}
+	if err := h.store.Put(r.Context(), &sub); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("join request failed"))
+		return
+	}
+	writeJSON(w, http.StatusCreated, sub)
+}
+
+func (h *Handler) ListJoinRequests(w http.ResponseWriter, r *http.Request) {
+	fleetID := strings.TrimSpace(r.URL.Query().Get("fleet_id"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status == "" {
+		status = "pending"
+	}
+	items, err := h.store.ListByFleetStatus(r.Context(), fleetID, status)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	if items == nil {
+		items = []Subscription{}
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (h *Handler) ApproveJoinRequest(w http.ResponseWriter, r *http.Request) {
+	subID := r.PathValue("id")
+	existing, err := h.store.GetByID(r.Context(), subID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errBody("join request not found"))
+		return
+	}
+	active, err := h.store.ListByFleetStatus(r.Context(), existing.FleetID, "active")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("quota lookup failed"))
+		return
+	}
+	if h.policy != nil {
+		if _, err := h.policy.CheckPassengerActivate(r.Context(), existing.FleetID, len(active)); err != nil {
+			writePolicyError(w, err)
+			return
+		}
+	}
+	existing.Status = "active"
+	existing.UpdatedAt = time.Now().UTC()
+	if err := h.store.Put(r.Context(), existing); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("approve failed"))
+		return
+	}
+	writeJSON(w, http.StatusOK, existing)
+}
+
+func (h *Handler) DenyJoinRequest(w http.ResponseWriter, r *http.Request) {
+	subID := r.PathValue("id")
+	existing, err := h.store.GetByID(r.Context(), subID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errBody("join request not found"))
+		return
+	}
+	existing.Status = "denied"
+	existing.UpdatedAt = time.Now().UTC()
+	if err := h.store.Put(r.Context(), existing); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("deny failed"))
+		return
+	}
+	writeJSON(w, http.StatusOK, existing)
 }
 
 // Update modifies a subscription's preferences or status.
@@ -195,4 +312,19 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func errBody(msg string) map[string]string {
 	return map[string]string{"error": msg}
+}
+
+func writePolicyError(w http.ResponseWriter, err error) {
+	if pe, ok := tenantsvc.AsPolicyError(err); ok {
+		body := map[string]string{
+			"error": pe.Message,
+			"code":  pe.Code,
+		}
+		if pe.PublicMessage != "" {
+			body["public_message"] = pe.PublicMessage
+		}
+		writeJSON(w, pe.HTTPStatus, body)
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 }

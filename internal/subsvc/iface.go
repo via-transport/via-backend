@@ -7,7 +7,9 @@ import "context"
 type SubStore interface {
 	Put(ctx context.Context, sub *Subscription) error
 	Get(ctx context.Context, userID, subID string) (*Subscription, error)
+	GetByID(ctx context.Context, subID string) (*Subscription, error)
 	ListForUser(ctx context.Context, userID string) ([]Subscription, error)
 	ListForVehicle(ctx context.Context, vehicleID string) ([]Subscription, error)
+	ListByFleetStatus(ctx context.Context, fleetID, status string) ([]Subscription, error)
 	Delete(ctx context.Context, userID, subID string) error
 }
