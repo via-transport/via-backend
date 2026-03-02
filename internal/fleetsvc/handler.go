@@ -20,23 +20,35 @@ import (
 )
 
 const (
-	createVehicleCommandSubject  = "cmd.fleet.vehicle.create"
-	updateVehicleCommandSubject  = "cmd.fleet.vehicle.update"
-	deleteVehicleCommandSubject  = "cmd.fleet.vehicle.delete"
-	createDriverCommandSubject   = "cmd.fleet.driver.create"
-	updateDriverCommandSubject   = "cmd.fleet.driver.update"
-	deleteDriverCommandSubject   = "cmd.fleet.driver.delete"
-	assignDriverCommandSubject   = "cmd.fleet.vehicle.assign_driver"
-	unassignDriverCommandSubject = "cmd.fleet.vehicle.unassign_driver"
+	createVehicleCommandSubject         = "cmd.fleet.vehicle.create"
+	updateVehicleCommandSubject         = "cmd.fleet.vehicle.update"
+	deleteVehicleCommandSubject         = "cmd.fleet.vehicle.delete"
+	updateVehicleStatusCommandSubject   = "cmd.fleet.vehicle.update_status"
+	updateVehicleLocationCommandSubject = "cmd.fleet.vehicle.update_location"
+	createDriverCommandSubject          = "cmd.fleet.driver.create"
+	updateDriverCommandSubject          = "cmd.fleet.driver.update"
+	deleteDriverCommandSubject          = "cmd.fleet.driver.delete"
+	createEventCommandSubject           = "cmd.fleet.event.create"
+	updateEventCommandSubject           = "cmd.fleet.event.update"
+	createNoticeCommandSubject          = "cmd.fleet.notice.create"
+	markNoticeReadCommandSubject        = "cmd.fleet.notice.mark_read"
+	assignDriverCommandSubject          = "cmd.fleet.vehicle.assign_driver"
+	unassignDriverCommandSubject        = "cmd.fleet.vehicle.unassign_driver"
 
-	createVehicleOperationType  = "vehicle.create"
-	updateVehicleOperationType  = "vehicle.update"
-	deleteVehicleOperationType  = "vehicle.delete"
-	createDriverOperationType   = "driver.create"
-	updateDriverOperationType   = "driver.update"
-	deleteDriverOperationType   = "driver.delete"
-	assignDriverOperationType   = "vehicle.assign_driver"
-	unassignDriverOperationType = "vehicle.unassign_driver"
+	createVehicleOperationType         = "vehicle.create"
+	updateVehicleOperationType         = "vehicle.update"
+	deleteVehicleOperationType         = "vehicle.delete"
+	updateVehicleStatusOperationType   = "vehicle.update_status"
+	updateVehicleLocationOperationType = "vehicle.update_location"
+	createDriverOperationType          = "driver.create"
+	updateDriverOperationType          = "driver.update"
+	deleteDriverOperationType          = "driver.delete"
+	createEventOperationType           = "event.create"
+	updateEventOperationType           = "event.update"
+	createNoticeOperationType          = "notice.create"
+	markNoticeReadOperationType        = "notice.mark_read"
+	assignDriverOperationType          = "vehicle.assign_driver"
+	unassignDriverOperationType        = "vehicle.unassign_driver"
 )
 
 type createVehicleCommand struct {
@@ -57,6 +69,29 @@ type deleteVehicleCommand struct {
 	FleetID     string `json:"fleet_id"`
 }
 
+type updateVehicleStatusPayload struct {
+	FleetID       string `json:"fleet_id"`
+	Status        string `json:"status"`
+	StatusMessage string `json:"status_message"`
+}
+
+type updateVehicleStatusCommand struct {
+	OperationID string                     `json:"operation_id"`
+	VehicleID   string                     `json:"vehicle_id"`
+	Payload     updateVehicleStatusPayload `json:"payload"`
+}
+
+type updateVehicleLocationPayload struct {
+	FleetID  string          `json:"fleet_id"`
+	Location VehicleLocation `json:"location"`
+}
+
+type updateVehicleLocationCommand struct {
+	OperationID string                       `json:"operation_id"`
+	VehicleID   string                       `json:"vehicle_id"`
+	Payload     updateVehicleLocationPayload `json:"payload"`
+}
+
 type createDriverCommand struct {
 	OperationID string `json:"operation_id"`
 	Driver      Driver `json:"driver"`
@@ -73,6 +108,27 @@ type deleteDriverCommand struct {
 	OperationID string `json:"operation_id"`
 	DriverID    string `json:"driver_id"`
 	FleetID     string `json:"fleet_id"`
+}
+
+type createEventCommand struct {
+	OperationID string       `json:"operation_id"`
+	Event       SpecialEvent `json:"event"`
+}
+
+type updateEventCommand struct {
+	OperationID string                     `json:"operation_id"`
+	EventID     string                     `json:"event_id"`
+	Fields      map[string]json.RawMessage `json:"fields"`
+}
+
+type createNoticeCommand struct {
+	OperationID string       `json:"operation_id"`
+	Notice      DriverNotice `json:"notice"`
+}
+
+type markNoticeReadCommand struct {
+	OperationID string `json:"operation_id"`
+	NoticeID    string `json:"notice_id"`
 }
 
 type assignDriverPayload struct {
@@ -157,6 +213,12 @@ func (h *Handler) SubscribeCommands() error {
 	if err := h.subscribe(deleteVehicleCommandSubject, h.processDeleteVehicleCommand); err != nil {
 		return err
 	}
+	if err := h.subscribe(updateVehicleStatusCommandSubject, h.processUpdateVehicleStatusCommand); err != nil {
+		return err
+	}
+	if err := h.subscribe(updateVehicleLocationCommandSubject, h.processUpdateVehicleLocationCommand); err != nil {
+		return err
+	}
 	if err := h.subscribe(createDriverCommandSubject, h.processCreateDriverCommand); err != nil {
 		return err
 	}
@@ -164,6 +226,18 @@ func (h *Handler) SubscribeCommands() error {
 		return err
 	}
 	if err := h.subscribe(deleteDriverCommandSubject, h.processDeleteDriverCommand); err != nil {
+		return err
+	}
+	if err := h.subscribe(createEventCommandSubject, h.processCreateEventCommand); err != nil {
+		return err
+	}
+	if err := h.subscribe(updateEventCommandSubject, h.processUpdateEventCommand); err != nil {
+		return err
+	}
+	if err := h.subscribe(createNoticeCommandSubject, h.processCreateNoticeCommand); err != nil {
+		return err
+	}
+	if err := h.subscribe(markNoticeReadCommandSubject, h.processMarkNoticeReadCommand); err != nil {
 		return err
 	}
 	if err := h.subscribe(assignDriverCommandSubject, h.processAssignDriverCommand); err != nil {
@@ -325,64 +399,58 @@ func (h *Handler) DeleteVehicle(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) UpdateVehicleStatus(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("id")
-	var body struct {
-		FleetID       string `json:"fleet_id"`
-		Status        string `json:"status"`
-		StatusMessage string `json:"status_message"`
-	}
+	var body updateVehicleStatusPayload
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
-
-	v, err := h.store.GetVehicle(r.Context(), body.FleetID, vehicleID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+	cmd := &updateVehicleStatusCommand{
+		VehicleID: vehicleID,
+		Payload:   body,
+	}
+	if err := h.enqueueOperation(
+		r.Context(),
+		updateVehicleStatusOperationType,
+		"Vehicle status update accepted for async processing.",
+		updateVehicleStatusCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	v.Status = body.Status
-	if body.StatusMessage != "" {
-		v.StatusMessage = body.StatusMessage
-	}
-	v.LastUpdated = time.Now().UTC()
-
-	if err := h.store.PutVehicle(r.Context(), v); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
-		return
-	}
-	h.fanoutVehicleChange(
-		v.FleetID,
-		v.ID,
-		"vehicle_status_changed",
-		buildVehicleStatusMessage(v),
-	)
-	writeJSON(w, http.StatusOK, v)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Vehicle status update queued.",
+	})
 }
 
 func (h *Handler) UpdateVehicleLocation(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("id")
-	var body struct {
-		FleetID  string          `json:"fleet_id"`
-		Location VehicleLocation `json:"location"`
-	}
+	var body updateVehicleLocationPayload
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
-
-	v, err := h.store.GetVehicle(r.Context(), body.FleetID, vehicleID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+	cmd := &updateVehicleLocationCommand{
+		VehicleID: vehicleID,
+		Payload:   body,
+	}
+	if err := h.enqueueOperation(
+		r.Context(),
+		updateVehicleLocationOperationType,
+		"Vehicle location update accepted for async processing.",
+		updateVehicleLocationCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	v.CurrentLocation = &body.Location
-	v.LastUpdated = time.Now().UTC()
-
-	if err := h.store.PutVehicle(r.Context(), v); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
-		return
-	}
-	writeJSON(w, http.StatusOK, v)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Vehicle location update queued.",
+	})
 }
 
 func (h *Handler) AssignDriver(w http.ResponseWriter, r *http.Request) {
@@ -625,42 +693,59 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = uuid.NewString()
 	}
-	if e.Timestamp.IsZero() {
-		e.Timestamp = time.Now().UTC()
-	}
-	if err := h.store.PutEvent(r.Context(), &e); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("create failed"))
+	cmd := &createEventCommand{Event: e}
+	if err := h.enqueueOperation(
+		r.Context(),
+		createEventOperationType,
+		"Event creation accepted for async processing.",
+		createEventCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	h.fanoutVehicleChange(e.FleetID, e.VehicleID, "event_"+e.Type)
-	writeJSON(w, http.StatusCreated, e)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Event creation queued.",
+	})
 }
 
 func (h *Handler) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 	eventID := r.PathValue("id")
-	existing, err := h.store.GetEvent(r.Context(), eventID)
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("event not found"))
+		writeJSON(w, http.StatusBadRequest, errBody("invalid body"))
 		return
 	}
 	var update SpecialEvent
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+	if err := json.Unmarshal(bodyBytes, &update); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
-	if update.Metadata != nil {
-		existing.Metadata = update.Metadata
+	var rawFields map[string]json.RawMessage
+	_ = json.Unmarshal(bodyBytes, &rawFields)
+	cmd := &updateEventCommand{
+		EventID: eventID,
+		Fields:  rawFields,
 	}
-	if update.Message != "" {
-		existing.Message = update.Message
-	}
-	if err := h.store.PutEvent(r.Context(), existing); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
+	if err := h.enqueueOperation(
+		r.Context(),
+		updateEventOperationType,
+		"Event update accepted for async processing.",
+		updateEventCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	writeJSON(w, http.StatusOK, existing)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Event update queued.",
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -698,32 +783,44 @@ func (h *Handler) CreateNotice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n.ID == "" {
-		n.ID = uuid.New().String()
+		n.ID = uuid.NewString()
 	}
-	if n.Timestamp.IsZero() {
-		n.Timestamp = time.Now().UTC()
-	}
-	if err := h.store.PutNotice(r.Context(), &n); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("create failed"))
+	cmd := &createNoticeCommand{Notice: n}
+	if err := h.enqueueOperation(
+		r.Context(),
+		createNoticeOperationType,
+		"Notice creation accepted for async processing.",
+		createNoticeCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	writeJSON(w, http.StatusCreated, n)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Notice creation queued.",
+	})
 }
 
 func (h *Handler) MarkNoticeRead(w http.ResponseWriter, r *http.Request) {
 	noticeID := r.PathValue("id")
-	n, err := h.store.GetNotice(r.Context(), noticeID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("notice not found"))
+	cmd := &markNoticeReadCommand{NoticeID: noticeID}
+	if err := h.enqueueOperation(
+		r.Context(),
+		markNoticeReadOperationType,
+		"Notice read update accepted for async processing.",
+		markNoticeReadCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	n.IsRead = true
-	n.ReadAt = time.Now().UTC()
-	if err := h.store.PutNotice(r.Context(), n); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
-		return
-	}
-	writeJSON(w, http.StatusOK, n)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Notice read update queued.",
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -895,6 +992,120 @@ func (h *Handler) processDeleteDriverCommand(payload []byte) {
 	}
 
 	h.markSucceeded(ctx, op, cmd.DriverID, "Driver deletion completed.")
+}
+
+func (h *Handler) processUpdateVehicleStatusCommand(payload []byte) {
+	var cmd updateVehicleStatusCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode update vehicle status command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, updateVehicleStatusOperationType)
+	h.markProcessing(ctx, op)
+
+	v, err := h.applyUpdateVehicleStatus(ctx, cmd.VehicleID, cmd.Payload)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to update vehicle status.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, v.ID, "Vehicle status update completed.")
+}
+
+func (h *Handler) processUpdateVehicleLocationCommand(payload []byte) {
+	var cmd updateVehicleLocationCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode update vehicle location command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, updateVehicleLocationOperationType)
+	h.markProcessing(ctx, op)
+
+	v, err := h.applyUpdateVehicleLocation(ctx, cmd.VehicleID, cmd.Payload)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to update vehicle location.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, v.ID, "Vehicle location update completed.")
+}
+
+func (h *Handler) processCreateEventCommand(payload []byte) {
+	var cmd createEventCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode create event command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, createEventOperationType)
+	h.markProcessing(ctx, op)
+
+	e, err := h.applyCreateEvent(ctx, cmd.Event)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to create event.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, e.ID, "Event creation completed.")
+}
+
+func (h *Handler) processUpdateEventCommand(payload []byte) {
+	var cmd updateEventCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode update event command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, updateEventOperationType)
+	h.markProcessing(ctx, op)
+
+	e, err := h.applyUpdateEvent(ctx, cmd.EventID, cmd.Fields)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to update event.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, e.ID, "Event update completed.")
+}
+
+func (h *Handler) processCreateNoticeCommand(payload []byte) {
+	var cmd createNoticeCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode create notice command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, createNoticeOperationType)
+	h.markProcessing(ctx, op)
+
+	n, err := h.applyCreateNotice(ctx, cmd.Notice)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to create notice.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, n.ID, "Notice creation completed.")
+}
+
+func (h *Handler) processMarkNoticeReadCommand(payload []byte) {
+	var cmd markNoticeReadCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode mark notice read command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, markNoticeReadOperationType)
+	h.markProcessing(ctx, op)
+
+	n, err := h.applyMarkNoticeRead(ctx, cmd.NoticeID)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to mark notice as read.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, n.ID, "Notice read update completed.")
 }
 
 func (h *Handler) processUnassignDriverCommand(payload []byte) {
@@ -1152,6 +1363,118 @@ func (h *Handler) applyDeleteDriver(ctx context.Context, driverID string, fleetI
 	return nil
 }
 
+func (h *Handler) applyUpdateVehicleStatus(
+	ctx context.Context,
+	vehicleID string,
+	body updateVehicleStatusPayload,
+) (*Vehicle, error) {
+	v, err := h.store.GetVehicle(ctx, body.FleetID, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("vehicle not found")
+	}
+	v.Status = body.Status
+	if body.StatusMessage != "" {
+		v.StatusMessage = body.StatusMessage
+	}
+	v.LastUpdated = time.Now().UTC()
+
+	if err := h.store.PutVehicle(ctx, v); err != nil {
+		return nil, fmt.Errorf("update failed")
+	}
+	h.fanoutVehicleChange(
+		v.FleetID,
+		v.ID,
+		"vehicle_status_changed",
+		buildVehicleStatusMessage(v),
+	)
+	return v, nil
+}
+
+func (h *Handler) applyUpdateVehicleLocation(
+	ctx context.Context,
+	vehicleID string,
+	body updateVehicleLocationPayload,
+) (*Vehicle, error) {
+	v, err := h.store.GetVehicle(ctx, body.FleetID, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("vehicle not found")
+	}
+	v.CurrentLocation = &body.Location
+	v.LastUpdated = time.Now().UTC()
+
+	if err := h.store.PutVehicle(ctx, v); err != nil {
+		return nil, fmt.Errorf("update failed")
+	}
+	return v, nil
+}
+
+func (h *Handler) applyCreateEvent(ctx context.Context, e SpecialEvent) (*SpecialEvent, error) {
+	if e.ID == "" {
+		e.ID = uuid.NewString()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if err := h.store.PutEvent(ctx, &e); err != nil {
+		return nil, fmt.Errorf("create failed")
+	}
+	h.fanoutVehicleChange(e.FleetID, e.VehicleID, "event_"+e.Type)
+	return &e, nil
+}
+
+func (h *Handler) applyUpdateEvent(
+	ctx context.Context,
+	eventID string,
+	rawFields map[string]json.RawMessage,
+) (*SpecialEvent, error) {
+	existing, err := h.store.GetEvent(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("event not found")
+	}
+	if raw, ok := rawFields["metadata"]; ok {
+		var value map[string]interface{}
+		if err := json.Unmarshal(raw, &value); err == nil {
+			existing.Metadata = value
+		}
+	}
+	if raw, ok := rawFields["message"]; ok {
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil && value != "" {
+			existing.Message = value
+		}
+	}
+	if err := h.store.PutEvent(ctx, existing); err != nil {
+		return nil, fmt.Errorf("update failed")
+	}
+	return existing, nil
+}
+
+func (h *Handler) applyCreateNotice(ctx context.Context, n DriverNotice) (*DriverNotice, error) {
+	if n.ID == "" {
+		n.ID = uuid.NewString()
+	}
+	if n.Timestamp.IsZero() {
+		n.Timestamp = time.Now().UTC()
+	}
+	if err := h.store.PutNotice(ctx, &n); err != nil {
+		return nil, fmt.Errorf("create failed")
+	}
+	return &n, nil
+}
+
+func (h *Handler) applyMarkNoticeRead(ctx context.Context, noticeID string) (*DriverNotice, error) {
+	n, err := h.store.GetNotice(ctx, noticeID)
+	if err != nil {
+		return nil, fmt.Errorf("notice not found")
+	}
+	n.IsRead = true
+	n.ReadAt = time.Now().UTC()
+	if err := h.store.PutNotice(ctx, n); err != nil {
+		return nil, fmt.Errorf("update failed")
+	}
+	return n, nil
+}
+
 func (h *Handler) applyAssignDriver(
 	ctx context.Context,
 	vehicleID string,
@@ -1288,11 +1611,23 @@ func (h *Handler) enqueueOperation(
 		cmd.OperationID = opID
 	case *deleteVehicleCommand:
 		cmd.OperationID = opID
+	case *updateVehicleStatusCommand:
+		cmd.OperationID = opID
+	case *updateVehicleLocationCommand:
+		cmd.OperationID = opID
 	case *createDriverCommand:
 		cmd.OperationID = opID
 	case *updateDriverCommand:
 		cmd.OperationID = opID
 	case *deleteDriverCommand:
+		cmd.OperationID = opID
+	case *createEventCommand:
+		cmd.OperationID = opID
+	case *updateEventCommand:
+		cmd.OperationID = opID
+	case *createNoticeCommand:
+		cmd.OperationID = opID
+	case *markNoticeReadCommand:
 		cmd.OperationID = opID
 	case *assignDriverCommand:
 		cmd.OperationID = opID
