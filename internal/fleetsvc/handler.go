@@ -20,12 +20,36 @@ import (
 )
 
 const (
+	createVehicleCommandSubject  = "cmd.fleet.vehicle.create"
+	updateVehicleCommandSubject  = "cmd.fleet.vehicle.update"
+	deleteVehicleCommandSubject  = "cmd.fleet.vehicle.delete"
 	assignDriverCommandSubject   = "cmd.fleet.vehicle.assign_driver"
 	unassignDriverCommandSubject = "cmd.fleet.vehicle.unassign_driver"
 
+	createVehicleOperationType  = "vehicle.create"
+	updateVehicleOperationType  = "vehicle.update"
+	deleteVehicleOperationType  = "vehicle.delete"
 	assignDriverOperationType   = "vehicle.assign_driver"
 	unassignDriverOperationType = "vehicle.unassign_driver"
 )
+
+type createVehicleCommand struct {
+	OperationID string  `json:"operation_id"`
+	Vehicle     Vehicle `json:"vehicle"`
+}
+
+type updateVehicleCommand struct {
+	OperationID string                     `json:"operation_id"`
+	VehicleID   string                     `json:"vehicle_id"`
+	FleetID     string                     `json:"fleet_id,omitempty"`
+	Fields      map[string]json.RawMessage `json:"fields"`
+}
+
+type deleteVehicleCommand struct {
+	OperationID string `json:"operation_id"`
+	VehicleID   string `json:"vehicle_id"`
+	FleetID     string `json:"fleet_id"`
+}
 
 type assignDriverPayload struct {
 	FleetID     string `json:"fleet_id"`
@@ -100,6 +124,15 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 }
 
 func (h *Handler) SubscribeCommands() error {
+	if err := h.subscribe(createVehicleCommandSubject, h.processCreateVehicleCommand); err != nil {
+		return err
+	}
+	if err := h.subscribe(updateVehicleCommandSubject, h.processUpdateVehicleCommand); err != nil {
+		return err
+	}
+	if err := h.subscribe(deleteVehicleCommandSubject, h.processDeleteVehicleCommand); err != nil {
+		return err
+	}
 	if err := h.subscribe(assignDriverCommandSubject, h.processAssignDriverCommand); err != nil {
 		return err
 	}
@@ -167,38 +200,27 @@ func (h *Handler) CreateVehicle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("fleet_id and registration_number required"))
 		return
 	}
-	if v.ID == "" {
-		v.ID = uuid.New().String()
-	}
-	now := time.Now().UTC()
-	v.CreatedAt = now
-	v.LastUpdated = now
-	if v.Status == "" {
-		v.Status = "idle"
-	}
-	if h.policy != nil {
-		existing, err := h.store.ListVehicles(r.Context(), v.FleetID)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errBody("quota lookup failed"))
-			return
-		}
-		if _, err := h.policy.CheckVehicleCreate(r.Context(), v.FleetID, len(existing)); err != nil {
-			writePolicyError(w, err)
-			return
-		}
-	}
-
-	if err := h.store.PutVehicle(r.Context(), &v); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("create failed"))
+	cmd := &createVehicleCommand{Vehicle: v}
+	if err := h.enqueueOperation(
+		r.Context(),
+		createVehicleOperationType,
+		"Vehicle creation accepted for async processing.",
+		createVehicleCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	writeJSON(w, http.StatusCreated, v)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Vehicle creation queued.",
+	})
 }
 
 func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("id")
 
-	// Read body once so we can both decode the struct and check raw keys.
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid body"))
@@ -211,7 +233,6 @@ func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check which keys were explicitly sent.
 	var rawFields map[string]json.RawMessage
 	_ = json.Unmarshal(bodyBytes, &rawFields)
 
@@ -219,71 +240,26 @@ func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 	if fleetID == "" {
 		fleetID = r.URL.Query().Get("fleet_id")
 	}
-
-	existing, err := h.store.GetVehicle(r.Context(), fleetID, vehicleID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+	cmd := &updateVehicleCommand{
+		VehicleID: vehicleID,
+		FleetID:   fleetID,
+		Fields:    rawFields,
+	}
+	if err := h.enqueueOperation(
+		r.Context(),
+		updateVehicleOperationType,
+		"Vehicle update accepted for async processing.",
+		updateVehicleCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-
-	// Merge fields.
-	previousStatus := existing.Status
-	previousIsActive := existing.IsActive
-	statusTransitionRequested := false
-	if update.RegistrationNumber != "" {
-		existing.RegistrationNumber = update.RegistrationNumber
-	}
-	if update.Type != "" {
-		existing.Type = update.Type
-	}
-	if update.ServiceType != "" {
-		existing.ServiceType = update.ServiceType
-	}
-	if update.Status != "" {
-		existing.Status = update.Status
-	}
-	if _, ok := rawFields["status_message"]; ok {
-		existing.StatusMessage = update.StatusMessage
-	}
-	if _, ok := rawFields["status"]; ok {
-		statusTransitionRequested = true
-	}
-	if update.Capacity > 0 {
-		existing.Capacity = update.Capacity
-	}
-	if _, ok := rawFields["current_route_id"]; ok {
-		existing.CurrentRouteID = update.CurrentRouteID
-	}
-	if _, ok := rawFields["driver_id"]; ok {
-		existing.DriverID = update.DriverID
-	}
-	if _, ok := rawFields["driver_name"]; ok {
-		existing.DriverName = update.DriverName
-	}
-	if _, ok := rawFields["driver_phone"]; ok {
-		existing.DriverPhone = update.DriverPhone
-	}
-	// Only update IsActive if explicitly present in the request body.
-	if _, ok := rawFields["is_active"]; ok {
-		existing.IsActive = update.IsActive
-		statusTransitionRequested = true
-	}
-	existing.LastUpdated = time.Now().UTC()
-
-	if err := h.store.PutVehicle(r.Context(), existing); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
-		return
-	}
-	if statusTransitionRequested &&
-		(previousStatus != existing.Status || previousIsActive != existing.IsActive) {
-		h.fanoutVehicleChange(
-			existing.FleetID,
-			existing.ID,
-			"vehicle_status_changed",
-			buildVehicleStatusMessage(existing),
-		)
-	}
-	writeJSON(w, http.StatusOK, existing)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Vehicle update queued.",
+	})
 }
 
 func (h *Handler) DeleteVehicle(w http.ResponseWriter, r *http.Request) {
@@ -293,11 +269,25 @@ func (h *Handler) DeleteVehicle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required"))
 		return
 	}
-	if err := h.store.DeleteVehicle(r.Context(), fleetID, vehicleID); err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+	cmd := &deleteVehicleCommand{
+		VehicleID: vehicleID,
+		FleetID:   fleetID,
+	}
+	if err := h.enqueueOperation(
+		r.Context(),
+		deleteVehicleOperationType,
+		"Vehicle deletion accepted for async processing.",
+		deleteVehicleCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Vehicle deletion queued.",
+	})
 }
 
 func (h *Handler) UpdateVehicleStatus(w http.ResponseWriter, r *http.Request) {
@@ -780,6 +770,62 @@ func (h *Handler) processAssignDriverCommand(payload []byte) {
 	h.markSucceeded(ctx, op, v.ID, "Vehicle assignment completed.")
 }
 
+func (h *Handler) processCreateVehicleCommand(payload []byte) {
+	var cmd createVehicleCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode create vehicle command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, createVehicleOperationType)
+	h.markProcessing(ctx, op)
+
+	v, err := h.applyCreateVehicle(ctx, cmd.Vehicle)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to create vehicle.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, v.ID, "Vehicle creation completed.")
+}
+
+func (h *Handler) processUpdateVehicleCommand(payload []byte) {
+	var cmd updateVehicleCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode update vehicle command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, updateVehicleOperationType)
+	h.markProcessing(ctx, op)
+
+	v, err := h.applyUpdateVehicle(ctx, cmd.VehicleID, cmd.FleetID, cmd.Fields)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to update vehicle.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, v.ID, "Vehicle update completed.")
+}
+
+func (h *Handler) processDeleteVehicleCommand(payload []byte) {
+	var cmd deleteVehicleCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode delete vehicle command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, deleteVehicleOperationType)
+	h.markProcessing(ctx, op)
+
+	if err := h.applyDeleteVehicle(ctx, cmd.VehicleID, cmd.FleetID); err != nil {
+		h.markFailed(ctx, op, "Failed to delete vehicle.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, cmd.VehicleID, "Vehicle deletion completed.")
+}
+
 func (h *Handler) processUnassignDriverCommand(payload []byte) {
 	var cmd unassignDriverCommand
 	if err := json.Unmarshal(payload, &cmd); err != nil {
@@ -797,6 +843,155 @@ func (h *Handler) processUnassignDriverCommand(payload []byte) {
 	}
 
 	h.markSucceeded(ctx, op, v.ID, "Vehicle unassignment completed.")
+}
+
+func (h *Handler) applyCreateVehicle(ctx context.Context, v Vehicle) (*Vehicle, error) {
+	if v.ID == "" {
+		v.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	v.CreatedAt = now
+	v.LastUpdated = now
+	if v.Status == "" {
+		v.Status = "idle"
+	}
+	if h.policy != nil {
+		existing, err := h.store.ListVehicles(ctx, v.FleetID)
+		if err != nil {
+			return nil, fmt.Errorf("quota lookup failed")
+		}
+		if _, err := h.policy.CheckVehicleCreate(ctx, v.FleetID, len(existing)); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := h.store.PutVehicle(ctx, &v); err != nil {
+		return nil, fmt.Errorf("create failed")
+	}
+	return &v, nil
+}
+
+func (h *Handler) applyUpdateVehicle(
+	ctx context.Context,
+	vehicleID string,
+	fleetID string,
+	rawFields map[string]json.RawMessage,
+) (*Vehicle, error) {
+	existing, err := h.store.GetVehicle(ctx, fleetID, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("vehicle not found")
+	}
+
+	previousStatus := existing.Status
+	previousIsActive := existing.IsActive
+	statusTransitionRequested := false
+
+	if raw, ok := rawFields["registration_number"]; ok {
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil && strings.TrimSpace(value) != "" {
+			existing.RegistrationNumber = value
+		}
+	}
+	if raw, ok := rawFields["type"]; ok {
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil && strings.TrimSpace(value) != "" {
+			existing.Type = value
+		}
+	}
+	if raw, ok := rawFields["service_type"]; ok {
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil && strings.TrimSpace(value) != "" {
+			existing.ServiceType = value
+		}
+	}
+	if raw, ok := rawFields["status"]; ok {
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil && strings.TrimSpace(value) != "" {
+			existing.Status = value
+		}
+		statusTransitionRequested = true
+	}
+	if raw, ok := rawFields["status_message"]; ok {
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			existing.StatusMessage = value
+		}
+	}
+	if raw, ok := rawFields["capacity"]; ok {
+		var value int
+		if err := json.Unmarshal(raw, &value); err == nil && value > 0 {
+			existing.Capacity = value
+		}
+	}
+	if raw, ok := rawFields["current_route_id"]; ok {
+		var value *string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			if value == nil {
+				existing.CurrentRouteID = ""
+			} else {
+				existing.CurrentRouteID = *value
+			}
+		}
+	}
+	if raw, ok := rawFields["driver_id"]; ok {
+		var value *string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			if value == nil {
+				existing.DriverID = ""
+			} else {
+				existing.DriverID = *value
+			}
+		}
+	}
+	if raw, ok := rawFields["driver_name"]; ok {
+		var value *string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			if value == nil {
+				existing.DriverName = ""
+			} else {
+				existing.DriverName = *value
+			}
+		}
+	}
+	if raw, ok := rawFields["driver_phone"]; ok {
+		var value *string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			if value == nil {
+				existing.DriverPhone = ""
+			} else {
+				existing.DriverPhone = *value
+			}
+		}
+	}
+	if raw, ok := rawFields["is_active"]; ok {
+		var value bool
+		if err := json.Unmarshal(raw, &value); err == nil {
+			existing.IsActive = value
+		}
+		statusTransitionRequested = true
+	}
+
+	existing.LastUpdated = time.Now().UTC()
+	if err := h.store.PutVehicle(ctx, existing); err != nil {
+		return nil, fmt.Errorf("update failed")
+	}
+	if statusTransitionRequested &&
+		(previousStatus != existing.Status || previousIsActive != existing.IsActive) {
+		h.fanoutVehicleChange(
+			existing.FleetID,
+			existing.ID,
+			"vehicle_status_changed",
+			buildVehicleStatusMessage(existing),
+		)
+	}
+	return existing, nil
+}
+
+func (h *Handler) applyDeleteVehicle(ctx context.Context, vehicleID string, fleetID string) error {
+	if err := h.store.DeleteVehicle(ctx, fleetID, vehicleID); err != nil {
+		return fmt.Errorf("vehicle not found")
+	}
+	return nil
 }
 
 func (h *Handler) applyAssignDriver(
@@ -929,6 +1124,12 @@ func (h *Handler) enqueueOperation(
 	}
 
 	switch cmd := command.(type) {
+	case *createVehicleCommand:
+		cmd.OperationID = opID
+	case *updateVehicleCommand:
+		cmd.OperationID = opID
+	case *deleteVehicleCommand:
+		cmd.OperationID = opID
 	case *assignDriverCommand:
 		cmd.OperationID = opID
 	case *unassignDriverCommand:
