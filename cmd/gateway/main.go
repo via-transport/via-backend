@@ -22,6 +22,7 @@ import (
 	"via-backend/internal/fleetsvc"
 	"via-backend/internal/messaging"
 	"via-backend/internal/notifysvc"
+	"via-backend/internal/opsvc"
 	"via-backend/internal/requestsvc"
 	viasentry "via-backend/internal/sentry"
 	"via-backend/internal/server"
@@ -94,6 +95,7 @@ func main() {
 	var subStore subsvc.SubStore
 	var tenantStore tenantsvc.Store
 	var driverRequestStore requestsvc.Store
+	var operationStore opsvc.Store
 
 	if cfg.StoreBackend == "nats" {
 		log.Println("[main] store backend: NATS KV")
@@ -137,12 +139,17 @@ func main() {
 		if err != nil {
 			log.Fatalf("[main] %v", err)
 		}
+		operationsKV, err := broker.ProvisionKV("VIA_OPERATIONS", "Async command operations")
+		if err != nil {
+			log.Fatalf("[main] %v", err)
+		}
 		authStore = authsvc.NewStore(usersKV, emailsKV)
 		fleetStore = fleetsvc.NewStore(vehiclesKV, driversKV, eventsKV, noticesKV, appCache)
 		notifyStore = notifysvc.NewStore(notificationsKV)
 		subStore = subsvc.NewStore(subscriptionsKV)
 		tenantStore = tenantsvc.NewStore(tenantsKV)
 		driverRequestStore = requestsvc.NewStore(driverRequestsKV)
+		operationStore = opsvc.NewStore(operationsKV)
 	} else {
 		log.Println("[main] store backend: PostgreSQL")
 		pgCfg := database.ConfigFromEnv()
@@ -160,6 +167,7 @@ func main() {
 		subStore = subsvc.NewPGStore(pgPool)
 		tenantStore = tenantsvc.NewPGStore(pgPool)
 		driverRequestStore = requestsvc.NewPGStore(pgPool)
+		operationStore = opsvc.NewPGStore(pgPool)
 	}
 
 	tenantPolicy := tenantsvc.NewPolicy(tenantStore)
@@ -212,8 +220,15 @@ func main() {
 	notifyHandler.SubscribeNATS(broker)                  // cross-instance notification delivery
 	notifyHandler.SubscribeFleetEvents(broker, subStore) // event → notification pipeline
 
-	subHandler := subsvc.NewHandler(subStore, tenantPolicy)
-	requestHandler := requestsvc.NewHandler(driverRequestStore, fleetStore)
+	opsHandler := opsvc.NewHandler(operationStore)
+	subHandler := subsvc.NewHandler(subStore, tenantPolicy, broker, operationStore)
+	requestHandler := requestsvc.NewHandler(driverRequestStore, fleetStore, broker, operationStore)
+	if err := subHandler.SubscribeCommands(); err != nil {
+		log.Fatalf("[main] subscribe join requests: %v", err)
+	}
+	if err := requestHandler.SubscribeCommands(); err != nil {
+		log.Fatalf("[main] subscribe driver requests: %v", err)
+	}
 
 	// 7. Auth / RBAC
 	authCfg := auth.MiddlewareConfig{
@@ -225,7 +240,7 @@ func main() {
 
 	// 8. HTTP server
 	srv := server.New(cfg, gpsSvc, eventSvc, broker, gpsCache, appCache, authCfg,
-		authHandler, tenantHandler, tenantPolicy, fleetHandler, notifyHandler, requestHandler, subHandler)
+		authHandler, tenantHandler, tenantPolicy, fleetHandler, notifyHandler, opsHandler, requestHandler, subHandler)
 
 	go func() {
 		if err := srv.Start(); err != nil {

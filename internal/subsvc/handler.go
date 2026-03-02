@@ -1,7 +1,9 @@
 package subsvc
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -9,18 +11,52 @@ import (
 	"github.com/google/uuid"
 
 	"via-backend/internal/auth"
+	"via-backend/internal/messaging"
+	"via-backend/internal/opsvc"
 	"via-backend/internal/tenantsvc"
 )
 
+const (
+	joinRequestCreateCommandSubject  = "cmd.access.join_request.create"
+	joinRequestApproveCommandSubject = "cmd.access.join_request.approve"
+	joinRequestDenyCommandSubject    = "cmd.access.join_request.deny"
+
+	joinRequestCreateOperationType  = "join_request.create"
+	joinRequestApproveOperationType = "join_request.approve"
+	joinRequestDenyOperationType    = "join_request.deny"
+)
+
+type createJoinRequestCommand struct {
+	OperationID  string       `json:"operation_id"`
+	Subscription Subscription `json:"subscription"`
+}
+
+type joinRequestDecisionCommand struct {
+	OperationID string `json:"operation_id"`
+	RequestID   string `json:"request_id"`
+}
+
 // Handler provides subscription REST endpoints.
 type Handler struct {
-	store  SubStore
-	policy *tenantsvc.Policy
+	store    SubStore
+	policy   *tenantsvc.Policy
+	broker   *messaging.Broker
+	opsStore opsvc.Store
 }
 
 // NewHandler creates a subscription handler.
-func NewHandler(store SubStore, policy *tenantsvc.Policy) *Handler {
-	return &Handler{store: store, policy: policy}
+func NewHandler(
+	store SubStore,
+	policy *tenantsvc.Policy,
+	broker *messaging.Broker,
+	opsStore opsvc.Store,
+) *Handler {
+	return &Handler{
+		store:    store,
+		policy:   policy,
+		broker:   broker,
+		opsStore: opsStore,
+	}
 }
 
 // Mount registers subscription routes.
@@ -35,6 +71,16 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/join-requests", h.ListJoinRequests)
 	mux.HandleFunc("POST /api/v1/join-requests/{id}/approve", h.ApproveJoinRequest)
 	mux.HandleFunc("POST /api/v1/join-requests/{id}/deny", h.DenyJoinRequest)
+}
+
+func (h *Handler) SubscribeCommands() error {
+	if err := h.subscribe(joinRequestCreateCommandSubject, h.processCreateJoinRequest); err != nil {
+		return err
+	}
+	if err := h.subscribe(joinRequestApproveCommandSubject, h.processApproveJoinRequest); err != nil {
+		return err
+	}
+	return h.subscribe(joinRequestDenyCommandSubject, h.processDenyJoinRequest)
 }
 
 // List returns all subscriptions for a user.
@@ -87,7 +133,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sub.ID == "" {
-		sub.ID = uuid.New().String()
+		sub.ID = uuid.NewString()
 	}
 	if sub.FleetID == "" {
 		sub.FleetID = strings.TrimSpace(r.URL.Query().Get("fleet_id"))
@@ -133,17 +179,18 @@ func (h *Handler) CreateJoinRequest(w http.ResponseWriter, r *http.Request) {
 	if sub.UserID == "" {
 		sub.UserID = userIDFromRequest(r)
 	}
+	sub.UserID = strings.TrimSpace(sub.UserID)
+	sub.VehicleID = strings.TrimSpace(sub.VehicleID)
 	if sub.UserID == "" || sub.VehicleID == "" {
 		writeJSON(w, http.StatusBadRequest, errBody("user_id and vehicle_id required"))
 		return
 	}
 	if sub.ID == "" {
-		sub.ID = uuid.New().String()
+		sub.ID = uuid.NewString()
 	}
-	now := time.Now().UTC()
-	sub.CreatedAt = now
-	sub.UpdatedAt = now
-	sub.Status = "pending"
+	if sub.FleetID == "" {
+		sub.FleetID = strings.TrimSpace(r.URL.Query().Get("fleet_id"))
+	}
 	if sub.Preferences == (SubPrefs{}) {
 		sub.Preferences = SubPrefs{
 			NotifyOnArrival: true,
@@ -151,11 +198,26 @@ func (h *Handler) CreateJoinRequest(w http.ResponseWriter, r *http.Request) {
 			NotifyOnEvent:   true,
 		}
 	}
-	if err := h.store.Put(r.Context(), &sub); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("join request failed"))
+
+	cmd := createJoinRequestCommand{
+		Subscription: sub,
+	}
+	if err := h.enqueueCommand(
+		r.Context(),
+		joinRequestCreateOperationType,
+		"Passenger join request accepted for async processing.",
+		joinRequestCreateCommandSubject,
+		&cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	writeJSON(w, http.StatusCreated, sub)
+
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Passenger join request queued.",
+	})
 }
 
 func (h *Handler) ListJoinRequests(w http.ResponseWriter, r *http.Request) {
@@ -176,46 +238,55 @@ func (h *Handler) ListJoinRequests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ApproveJoinRequest(w http.ResponseWriter, r *http.Request) {
-	subID := r.PathValue("id")
-	existing, err := h.store.GetByID(r.Context(), subID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("join request not found"))
+	subID := strings.TrimSpace(r.PathValue("id"))
+	if subID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("join request id required"))
 		return
 	}
-	active, err := h.store.ListByFleetStatus(r.Context(), existing.FleetID, "active")
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("quota lookup failed"))
+
+	cmd := joinRequestDecisionCommand{RequestID: subID}
+	if err := h.enqueueCommand(
+		r.Context(),
+		joinRequestApproveOperationType,
+		"Passenger join request approval accepted for async processing.",
+		joinRequestApproveCommandSubject,
+		&cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	if h.policy != nil {
-		if _, err := h.policy.CheckPassengerActivate(r.Context(), existing.FleetID, len(active)); err != nil {
-			writePolicyError(w, err)
-			return
-		}
-	}
-	existing.Status = "active"
-	existing.UpdatedAt = time.Now().UTC()
-	if err := h.store.Put(r.Context(), existing); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("approve failed"))
-		return
-	}
-	writeJSON(w, http.StatusOK, existing)
+
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Passenger join request approval queued.",
+	})
 }
 
 func (h *Handler) DenyJoinRequest(w http.ResponseWriter, r *http.Request) {
-	subID := r.PathValue("id")
-	existing, err := h.store.GetByID(r.Context(), subID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("join request not found"))
+	subID := strings.TrimSpace(r.PathValue("id"))
+	if subID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("join request id required"))
 		return
 	}
-	existing.Status = "denied"
-	existing.UpdatedAt = time.Now().UTC()
-	if err := h.store.Put(r.Context(), existing); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("deny failed"))
+
+	cmd := joinRequestDecisionCommand{RequestID: subID}
+	if err := h.enqueueCommand(
+		r.Context(),
+		joinRequestDenyOperationType,
+		"Passenger join request denial accepted for async processing.",
+		joinRequestDenyCommandSubject,
+		&cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	writeJSON(w, http.StatusOK, existing)
+
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Passenger join request denial queued.",
+	})
 }
 
 // Update modifies a subscription's preferences or status.
@@ -290,6 +361,233 @@ func (h *Handler) ListForVehicle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, subs)
 }
 
+func (h *Handler) subscribe(subject string, process func([]byte)) error {
+	ch := make(chan []byte, 64)
+	if _, err := h.broker.Subscribe(subject, ch); err != nil {
+		return err
+	}
+	go func() {
+		for payload := range ch {
+			process(payload)
+		}
+	}()
+	return nil
+}
+
+func (h *Handler) processCreateJoinRequest(payload []byte) {
+	var cmd createJoinRequestCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[join-requests] decode create command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, joinRequestCreateOperationType)
+	h.markProcessing(ctx, op)
+
+	existing, err := h.findExistingJoinRequest(ctx, cmd.Subscription.UserID, cmd.Subscription.VehicleID, cmd.Subscription.FleetID)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to check existing passenger access request.", err)
+		return
+	}
+	if existing != nil {
+		message := "Passenger access request is already pending."
+		if existing.Status == "active" {
+			message = "Passenger access is already active."
+		}
+		h.markSucceeded(ctx, op, existing.ID, message)
+		return
+	}
+
+	now := time.Now().UTC()
+	cmd.Subscription.Status = "pending"
+	if cmd.Subscription.CreatedAt.IsZero() {
+		cmd.Subscription.CreatedAt = now
+	}
+	cmd.Subscription.UpdatedAt = now
+
+	if err := h.store.Put(ctx, &cmd.Subscription); err != nil {
+		h.markFailed(ctx, op, "Failed to create passenger access request.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, cmd.Subscription.ID, "Passenger access request queued successfully.")
+}
+
+func (h *Handler) processApproveJoinRequest(payload []byte) {
+	var cmd joinRequestDecisionCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[join-requests] decode approve command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, joinRequestApproveOperationType)
+	h.markProcessing(ctx, op)
+
+	existing, err := h.store.GetByID(ctx, cmd.RequestID)
+	if err != nil {
+		h.markFailed(ctx, op, "Passenger join request not found.", err)
+		return
+	}
+	active, err := h.store.ListByFleetStatus(ctx, existing.FleetID, "active")
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to check passenger quota.", err)
+		return
+	}
+	if h.policy != nil {
+		if _, err := h.policy.CheckPassengerActivate(ctx, existing.FleetID, len(active)); err != nil {
+			h.markFailed(ctx, op, "Passenger activation blocked by tenant policy.", err)
+			return
+		}
+	}
+	existing.Status = "active"
+	existing.UpdatedAt = time.Now().UTC()
+	if err := h.store.Put(ctx, existing); err != nil {
+		h.markFailed(ctx, op, "Failed to approve passenger join request.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, existing.ID, "Passenger join request approved.")
+}
+
+func (h *Handler) processDenyJoinRequest(payload []byte) {
+	var cmd joinRequestDecisionCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[join-requests] decode deny command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, joinRequestDenyOperationType)
+	h.markProcessing(ctx, op)
+
+	existing, err := h.store.GetByID(ctx, cmd.RequestID)
+	if err != nil {
+		h.markFailed(ctx, op, "Passenger join request not found.", err)
+		return
+	}
+	if existing.Status != "denied" {
+		existing.Status = "denied"
+		existing.UpdatedAt = time.Now().UTC()
+		if err := h.store.Put(ctx, existing); err != nil {
+			h.markFailed(ctx, op, "Failed to deny passenger join request.", err)
+			return
+		}
+	}
+
+	h.markSucceeded(ctx, op, existing.ID, "Passenger join request denied.")
+}
+
+func (h *Handler) findExistingJoinRequest(
+	ctx context.Context,
+	userID string,
+	vehicleID string,
+	fleetID string,
+) (*Subscription, error) {
+	items, err := h.store.ListForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		item := items[i]
+		if item.VehicleID != vehicleID {
+			continue
+		}
+		if fleetID != "" && item.FleetID != "" && item.FleetID != fleetID {
+			continue
+		}
+		if item.Status == "pending" || item.Status == "active" {
+			copy := item
+			return &copy, nil
+		}
+	}
+	return nil, nil
+}
+
+func (h *Handler) enqueueCommand(
+	ctx context.Context,
+	opType string,
+	message string,
+	subject string,
+	command any,
+) error {
+	now := time.Now().UTC()
+	opID := uuid.NewString()
+	op := &opsvc.Operation{
+		ID:        opID,
+		Type:      opType,
+		Status:    opsvc.StatusQueued,
+		Message:   message,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := h.opsStore.Put(ctx, op); err != nil {
+		return err
+	}
+
+	switch cmd := command.(type) {
+	case *createJoinRequestCommand:
+		cmd.OperationID = opID
+	case *joinRequestDecisionCommand:
+		cmd.OperationID = opID
+	}
+
+	payload, err := json.Marshal(command)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to queue command.", err)
+		return err
+	}
+	if err := h.broker.Publish(subject, payload); err != nil {
+		h.markFailed(ctx, op, "Failed to publish command.", err)
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) loadOperation(ctx context.Context, operationID, opType string) *opsvc.Operation {
+	op, err := h.opsStore.Get(ctx, operationID)
+	if err == nil {
+		return op
+	}
+	now := time.Now().UTC()
+	return &opsvc.Operation{
+		ID:        operationID,
+		Type:      opType,
+		Status:    opsvc.StatusQueued,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+func (h *Handler) markProcessing(ctx context.Context, op *opsvc.Operation) {
+	op.Status = opsvc.StatusProcessing
+	op.UpdatedAt = time.Now().UTC()
+	if err := h.opsStore.Put(ctx, op); err != nil {
+		log.Printf("[join-requests] persist processing operation %s: %v", op.ID, err)
+	}
+}
+
+func (h *Handler) markSucceeded(ctx context.Context, op *opsvc.Operation, resourceID, message string) {
+	op.Status = opsvc.StatusSucceeded
+	op.ResourceID = resourceID
+	op.Message = message
+	op.ErrorMessage = ""
+	op.UpdatedAt = time.Now().UTC()
+	if err := h.opsStore.Put(ctx, op); err != nil {
+		log.Printf("[join-requests] persist success operation %s: %v", op.ID, err)
+	}
+}
+
+func (h *Handler) markFailed(ctx context.Context, op *opsvc.Operation, message string, cause error) {
+	op.Status = opsvc.StatusFailed
+	op.Message = message
+	if cause != nil {
+		op.ErrorMessage = cause.Error()
+	}
+	op.UpdatedAt = time.Now().UTC()
+	if err := h.opsStore.Put(ctx, op); err != nil {
+		log.Printf("[join-requests] persist failed operation %s: %v", op.ID, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -307,7 +605,7 @@ func userIDFromRequest(r *http.Request) string {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func errBody(msg string) map[string]string {
@@ -320,11 +618,8 @@ func writePolicyError(w http.ResponseWriter, err error) {
 			"error": pe.Message,
 			"code":  pe.Code,
 		}
-		if pe.PublicMessage != "" {
-			body["public_message"] = pe.PublicMessage
-		}
 		writeJSON(w, pe.HTTPStatus, body)
 		return
 	}
-	writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+	writeJSON(w, http.StatusForbidden, errBody(err.Error()))
 }

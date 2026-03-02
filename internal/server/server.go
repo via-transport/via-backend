@@ -20,6 +20,7 @@ import (
 	"via-backend/internal/messaging"
 	"via-backend/internal/middleware"
 	"via-backend/internal/notifysvc"
+	"via-backend/internal/opsvc"
 	"via-backend/internal/requestsvc"
 	viasentry "via-backend/internal/sentry"
 	"via-backend/internal/service"
@@ -47,6 +48,7 @@ func New(
 	tenantPolicy *tenantsvc.Policy,
 	fleetHandler *fleetsvc.Handler,
 	notifyHandler *notifysvc.Handler,
+	opsHandler *opsvc.Handler,
 	requestHandler *requestsvc.Handler,
 	subHandler *subsvc.Handler,
 ) *Server {
@@ -68,6 +70,7 @@ func New(
 	tenantHandler.Mount(mux)
 	fleetHandler.Mount(mux)
 	notifyHandler.Mount(mux)
+	opsHandler.Mount(mux)
 	requestHandler.Mount(mux)
 	subHandler.Mount(mux)
 
