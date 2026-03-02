@@ -21,7 +21,7 @@ const (
 	demoStandbyVehicleStatus     = "on_time"
 	demoStandbyVehicleStatusNote = "Standby vehicle ready"
 	demoStandbyRouteID           = "route_204"
-	demoDriverName               = "Kamal Perera"
+	demoDriverName               = "Kamal Perera Prime"
 	demoDriverEmail              = "kamal.perera@via.local"
 	demoDriverPhone              = "+94770001122"
 )
@@ -48,7 +48,7 @@ func EnsureDemoFleet(ctx context.Context, store FleetStore, fleetID string) erro
 		return err
 	}
 
-	return nil
+	return pruneDemoFleetEntities(ctx, store, fleetID)
 }
 
 func ensureDemoDriver(
@@ -77,15 +77,15 @@ func ensureDemoDriver(
 	}
 
 	changed := false
-	if driver.Email == "" {
+	if driver.Email != demoDriverEmail {
 		driver.Email = demoDriverEmail
 		changed = true
 	}
-	if driver.FullName == "" {
+	if driver.FullName != demoDriverName {
 		driver.FullName = demoDriverName
 		changed = true
 	}
-	if driver.Phone == "" {
+	if driver.Phone != demoDriverPhone {
 		driver.Phone = demoDriverPhone
 		changed = true
 	}
@@ -93,11 +93,9 @@ func ensureDemoDriver(
 		driver.IsActive = true
 		changed = true
 	}
-	if !containsDemoID(driver.AssignedVehicleIDs, demoPrimaryVehicleID) {
-		driver.AssignedVehicleIDs = append(
-			driver.AssignedVehicleIDs,
-			demoPrimaryVehicleID,
-		)
+	if len(driver.AssignedVehicleIDs) != 1 ||
+		driver.AssignedVehicleIDs[0] != demoPrimaryVehicleID {
+		driver.AssignedVehicleIDs = []string{demoPrimaryVehicleID}
 		changed = true
 	}
 
@@ -193,12 +191,12 @@ func ensurePrimaryDemoVehicle(
 		}
 		changed = true
 	}
-	if vehicle.DriverID == "" {
+	if vehicle.DriverID != driver.ID {
 		vehicle.DriverID = driver.ID
 		vehicle.DriverName = driver.FullName
 		vehicle.DriverPhone = driver.Phone
 		changed = true
-	} else if vehicle.DriverID == driver.ID {
+	} else {
 		if vehicle.DriverName != driver.FullName {
 			vehicle.DriverName = driver.FullName
 			changed = true
@@ -306,6 +304,12 @@ func ensureStandbyDemoVehicle(
 		vehicle.DriverPhone = ""
 		changed = true
 	}
+	if vehicle.DriverID != "" || vehicle.DriverName != "" || vehicle.DriverPhone != "" {
+		vehicle.DriverID = ""
+		vehicle.DriverName = ""
+		vehicle.DriverPhone = ""
+		changed = true
+	}
 
 	if changed {
 		if vehicle.CreatedAt.IsZero() {
@@ -333,11 +337,34 @@ func shouldNormalizeServiceType(current, desired string, aliases ...string) bool
 	return false
 }
 
-func containsDemoID(ids []string, target string) bool {
-	for _, id := range ids {
-		if id == target {
-			return true
+func pruneDemoFleetEntities(
+	ctx context.Context,
+	store FleetStore,
+	fleetID string,
+) error {
+	vehicles, err := store.ListVehicles(ctx, fleetID)
+	if err == nil {
+		for _, vehicle := range vehicles {
+			if vehicle.ID == demoPrimaryVehicleID || vehicle.ID == demoStandbyVehicleID {
+				continue
+			}
+			if err := store.DeleteVehicle(ctx, fleetID, vehicle.ID); err != nil {
+				return err
+			}
 		}
 	}
-	return false
+
+	drivers, err := store.ListDrivers(ctx, fleetID)
+	if err == nil {
+		for _, driver := range drivers {
+			if driver.ID == demoDriverID {
+				continue
+			}
+			if err := store.DeleteDriver(ctx, fleetID, driver.ID); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
