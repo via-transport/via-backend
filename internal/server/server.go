@@ -62,8 +62,8 @@ func New(
 	mux.HandleFunc("/v1/gps/update", handler.GPSIngest(gpsSvc, tenantPolicy))
 	mux.HandleFunc("/v1/trip/start", handler.TripStart(eventSvc, tenantPolicy))
 	mux.HandleFunc("/v1/events/publish", handler.EventPublish(eventSvc, tenantPolicy))
-	mux.HandleFunc("/ws", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy))
-	mux.HandleFunc("GET /api/v1/vehicles/{id}/stream", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy))
+	mux.HandleFunc("/ws", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy, opsHandlerStore(opsHandler)))
+	mux.HandleFunc("GET /api/v1/vehicles/{id}/stream", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy, opsHandlerStore(opsHandler)))
 
 	// --- Microservice routes ---
 	authHandler.Mount(mux)
@@ -97,6 +97,13 @@ func New(
 			MaxHeaderBytes:    1 << 16, // 64 KB
 		},
 	}
+}
+
+func opsHandlerStore(handler *opsvc.Handler) opsvc.Store {
+	if handler == nil {
+		return nil
+	}
+	return handler.Store()
 }
 
 // Start begins listening. It blocks until the server is shut down.

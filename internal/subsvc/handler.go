@@ -207,6 +207,7 @@ func (h *Handler) CreateJoinRequest(w http.ResponseWriter, r *http.Request) {
 		joinRequestCreateOperationType,
 		"Passenger join request accepted for async processing.",
 		joinRequestCreateCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		&cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -250,6 +251,7 @@ func (h *Handler) ApproveJoinRequest(w http.ResponseWriter, r *http.Request) {
 		joinRequestApproveOperationType,
 		"Passenger join request approval accepted for async processing.",
 		joinRequestApproveCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		&cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -276,6 +278,7 @@ func (h *Handler) DenyJoinRequest(w http.ResponseWriter, r *http.Request) {
 		joinRequestDenyOperationType,
 		"Passenger join request denial accepted for async processing.",
 		joinRequestDenyCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		&cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -507,21 +510,37 @@ func (h *Handler) enqueueCommand(
 	opType string,
 	message string,
 	subject string,
+	rawIdempotencyKey string,
 	command any,
 ) error {
+	idempotencyKey := normalizeIdempotencyKey(opType, rawIdempotencyKey)
+	if idempotencyKey != "" {
+		if existing, err := h.opsStore.FindByIdempotencyKey(ctx, idempotencyKey); err == nil && existing != nil {
+			switch cmd := command.(type) {
+			case *createJoinRequestCommand:
+				cmd.OperationID = existing.ID
+			case *joinRequestDecisionCommand:
+				cmd.OperationID = existing.ID
+			}
+			return nil
+		}
+	}
+
 	now := time.Now().UTC()
 	opID := uuid.NewString()
 	op := &opsvc.Operation{
-		ID:        opID,
-		Type:      opType,
-		Status:    opsvc.StatusQueued,
-		Message:   message,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             opID,
+		Type:           opType,
+		IdempotencyKey: idempotencyKey,
+		Status:         opsvc.StatusQueued,
+		Message:        message,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := h.opsStore.Put(ctx, op); err != nil {
 		return err
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
 
 	switch cmd := command.(type) {
 	case *createJoinRequestCommand:
@@ -563,6 +582,7 @@ func (h *Handler) markProcessing(ctx context.Context, op *opsvc.Operation) {
 	if err := h.opsStore.Put(ctx, op); err != nil {
 		log.Printf("[join-requests] persist processing operation %s: %v", op.ID, err)
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
 }
 
 func (h *Handler) markSucceeded(ctx context.Context, op *opsvc.Operation, resourceID, message string) {
@@ -574,6 +594,7 @@ func (h *Handler) markSucceeded(ctx context.Context, op *opsvc.Operation, resour
 	if err := h.opsStore.Put(ctx, op); err != nil {
 		log.Printf("[join-requests] persist success operation %s: %v", op.ID, err)
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
 }
 
 func (h *Handler) markFailed(ctx context.Context, op *opsvc.Operation, message string, cause error) {
@@ -586,6 +607,7 @@ func (h *Handler) markFailed(ctx context.Context, op *opsvc.Operation, message s
 	if err := h.opsStore.Put(ctx, op); err != nil {
 		log.Printf("[join-requests] persist failed operation %s: %v", op.ID, err)
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +622,14 @@ func userIDFromRequest(r *http.Request) string {
 		return id.UserID
 	}
 	return ""
+}
+
+func normalizeIdempotencyKey(opType, raw string) string {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return ""
+	}
+	return opType + ":" + normalized
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

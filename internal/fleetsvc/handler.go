@@ -313,6 +313,7 @@ func (h *Handler) CreateVehicle(w http.ResponseWriter, r *http.Request) {
 		createVehicleOperationType,
 		"Vehicle creation accepted for async processing.",
 		createVehicleCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -357,6 +358,7 @@ func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
 		updateVehicleOperationType,
 		"Vehicle update accepted for async processing.",
 		updateVehicleCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -385,6 +387,7 @@ func (h *Handler) DeleteVehicle(w http.ResponseWriter, r *http.Request) {
 		deleteVehicleOperationType,
 		"Vehicle deletion accepted for async processing.",
 		deleteVehicleCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -413,6 +416,7 @@ func (h *Handler) UpdateVehicleStatus(w http.ResponseWriter, r *http.Request) {
 		updateVehicleStatusOperationType,
 		"Vehicle status update accepted for async processing.",
 		updateVehicleStatusCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -441,6 +445,7 @@ func (h *Handler) UpdateVehicleLocation(w http.ResponseWriter, r *http.Request) 
 		updateVehicleLocationOperationType,
 		"Vehicle location update accepted for async processing.",
 		updateVehicleLocationCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -473,6 +478,7 @@ func (h *Handler) AssignDriver(w http.ResponseWriter, r *http.Request) {
 		assignDriverOperationType,
 		"Vehicle assignment accepted for async processing.",
 		assignDriverCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -506,6 +512,7 @@ func (h *Handler) UnassignDriver(w http.ResponseWriter, r *http.Request) {
 		unassignDriverOperationType,
 		"Vehicle unassignment accepted for async processing.",
 		unassignDriverCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -575,6 +582,7 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		createDriverOperationType,
 		"Driver creation accepted for async processing.",
 		createDriverCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -619,6 +627,7 @@ func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 		updateDriverOperationType,
 		"Driver update accepted for async processing.",
 		updateDriverCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -647,6 +656,7 @@ func (h *Handler) DeleteDriver(w http.ResponseWriter, r *http.Request) {
 		deleteDriverOperationType,
 		"Driver deletion accepted for async processing.",
 		deleteDriverCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -701,6 +711,7 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		createEventOperationType,
 		"Event creation accepted for async processing.",
 		createEventCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -736,6 +747,7 @@ func (h *Handler) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		updateEventOperationType,
 		"Event update accepted for async processing.",
 		updateEventCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -791,6 +803,7 @@ func (h *Handler) CreateNotice(w http.ResponseWriter, r *http.Request) {
 		createNoticeOperationType,
 		"Notice creation accepted for async processing.",
 		createNoticeCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -811,6 +824,7 @@ func (h *Handler) MarkNoticeRead(w http.ResponseWriter, r *http.Request) {
 		markNoticeReadOperationType,
 		"Notice read update accepted for async processing.",
 		markNoticeReadCommandSubject,
+		r.Header.Get("Idempotency-Key"),
 		cmd,
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
@@ -1588,21 +1602,61 @@ func (h *Handler) enqueueOperation(
 	opType string,
 	message string,
 	subject string,
+	rawIdempotencyKey string,
 	command any,
 ) error {
+	idempotencyKey := normalizeIdempotencyKey(opType, rawIdempotencyKey)
+	if idempotencyKey != "" {
+		if existing, err := h.ops.FindByIdempotencyKey(ctx, idempotencyKey); err == nil && existing != nil {
+			switch cmd := command.(type) {
+			case *createVehicleCommand:
+				cmd.OperationID = existing.ID
+			case *updateVehicleCommand:
+				cmd.OperationID = existing.ID
+			case *deleteVehicleCommand:
+				cmd.OperationID = existing.ID
+			case *updateVehicleStatusCommand:
+				cmd.OperationID = existing.ID
+			case *updateVehicleLocationCommand:
+				cmd.OperationID = existing.ID
+			case *createDriverCommand:
+				cmd.OperationID = existing.ID
+			case *updateDriverCommand:
+				cmd.OperationID = existing.ID
+			case *deleteDriverCommand:
+				cmd.OperationID = existing.ID
+			case *createEventCommand:
+				cmd.OperationID = existing.ID
+			case *updateEventCommand:
+				cmd.OperationID = existing.ID
+			case *createNoticeCommand:
+				cmd.OperationID = existing.ID
+			case *markNoticeReadCommand:
+				cmd.OperationID = existing.ID
+			case *assignDriverCommand:
+				cmd.OperationID = existing.ID
+			case *unassignDriverCommand:
+				cmd.OperationID = existing.ID
+			}
+			return nil
+		}
+	}
+
 	now := time.Now().UTC()
 	opID := uuid.NewString()
 	op := &opsvc.Operation{
-		ID:        opID,
-		Type:      opType,
-		Status:    opsvc.StatusQueued,
-		Message:   message,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             opID,
+		Type:           opType,
+		IdempotencyKey: idempotencyKey,
+		Status:         opsvc.StatusQueued,
+		Message:        message,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := h.ops.Put(ctx, op); err != nil {
 		return err
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
 
 	switch cmd := command.(type) {
 	case *createVehicleCommand:
@@ -1668,6 +1722,7 @@ func (h *Handler) markProcessing(ctx context.Context, op *opsvc.Operation) {
 	if err := h.ops.Put(ctx, op); err != nil {
 		log.Printf("[fleet] persist processing operation %s: %v", op.ID, err)
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
 }
 
 func (h *Handler) markSucceeded(ctx context.Context, op *opsvc.Operation, resourceID, message string) {
@@ -1679,6 +1734,7 @@ func (h *Handler) markSucceeded(ctx context.Context, op *opsvc.Operation, resour
 	if err := h.ops.Put(ctx, op); err != nil {
 		log.Printf("[fleet] persist success operation %s: %v", op.ID, err)
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
 }
 
 func (h *Handler) markFailed(ctx context.Context, op *opsvc.Operation, message string, cause error) {
@@ -1691,6 +1747,15 @@ func (h *Handler) markFailed(ctx context.Context, op *opsvc.Operation, message s
 	if err := h.ops.Put(ctx, op); err != nil {
 		log.Printf("[fleet] persist failed operation %s: %v", op.ID, err)
 	}
+	_ = opsvc.PublishUpdate(h.broker, op)
+}
+
+func normalizeIdempotencyKey(opType, raw string) string {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return ""
+	}
+	return opType + ":" + normalized
 }
 
 func buildVehicleStatusMessage(v *Vehicle) string {

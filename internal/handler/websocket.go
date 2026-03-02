@@ -13,6 +13,7 @@ import (
 	"via-backend/internal/config"
 	"via-backend/internal/messaging"
 	"via-backend/internal/model"
+	"via-backend/internal/opsvc"
 	"via-backend/internal/tenantsvc"
 )
 
@@ -24,7 +25,13 @@ var wsUpgrader = websocket.Upgrader{
 
 // WSFanout handles GET /ws. It upgrades the connection, subscribes to the
 // requested NATS subjects, and streams messages to the client.
-func WSFanout(broker *messaging.Broker, gpsCache *cache.GPSCache, cfg config.Config, policy *tenantsvc.Policy) http.HandlerFunc {
+func WSFanout(
+	broker *messaging.Broker,
+	gpsCache *cache.GPSCache,
+	cfg config.Config,
+	policy *tenantsvc.Policy,
+	opsStore opsvc.Store,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -40,24 +47,35 @@ func WSFanout(broker *messaging.Broker, gpsCache *cache.GPSCache, cfg config.Con
 		if topic == "" {
 			topic = model.TopicGPS
 		}
-		if fleetID == "" {
-			writeError(w, http.StatusBadRequest, "fleet_id is required")
-			return
-		}
-		if policy != nil {
-			if _, err := policy.EnsureRealtimeAllowed(r.Context(), fleetID); err != nil {
-				if writePolicyError(w, err) {
-					return
-				}
-				writeError(w, http.StatusBadRequest, err.Error())
+		operationID := strings.TrimSpace(r.URL.Query().Get("operation_id"))
+
+		var subjects []string
+		var err error
+		if topic == model.TopicOperations {
+			if operationID == "" {
+				writeError(w, http.StatusBadRequest, "operation_id is required")
 				return
 			}
-		}
-
-		subjects, err := messaging.SubjectsForTopic(topic, fleetID, vehicleID)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "unsupported topic")
-			return
+			subjects = []string{opsvc.OperationSubject(operationID)}
+		} else {
+			if fleetID == "" {
+				writeError(w, http.StatusBadRequest, "fleet_id is required")
+				return
+			}
+			if policy != nil {
+				if _, err := policy.EnsureRealtimeAllowed(r.Context(), fleetID); err != nil {
+					if writePolicyError(w, err) {
+						return
+					}
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
+			subjects, err = messaging.SubjectsForTopic(topic, fleetID, vehicleID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "unsupported topic")
+				return
+			}
 		}
 
 		wsConn, err := wsUpgrader.Upgrade(w, r, nil)
@@ -89,6 +107,13 @@ func WSFanout(broker *messaging.Broker, gpsCache *cache.GPSCache, cfg config.Con
 			for _, snap := range gpsCache.Snapshot(fleetID, vehicleID) {
 				_ = wsConn.SetWriteDeadline(time.Now().Add(cfg.WSWriteTimeout))
 				if err := wsConn.WriteMessage(websocket.TextMessage, snap); err != nil {
+					return
+				}
+			}
+		} else if topic == model.TopicOperations && opsStore != nil {
+			if op, err := opsStore.Get(r.Context(), operationID); err == nil {
+				_ = wsConn.SetWriteDeadline(time.Now().Add(cfg.WSWriteTimeout))
+				if err := wsConn.WriteJSON(op); err != nil {
 					return
 				}
 			}

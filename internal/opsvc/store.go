@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -37,4 +38,28 @@ func (s *KVStore) Get(ctx context.Context, id string) (*Operation, error) {
 		return nil, err
 	}
 	return &op, nil
+}
+
+func (s *KVStore) FindByIdempotencyKey(ctx context.Context, key string) (*Operation, error) {
+	keys, err := s.kv.Keys(ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "no keys found") {
+			return nil, fmt.Errorf("operation not found")
+		}
+		return nil, err
+	}
+	for _, candidate := range keys {
+		entry, err := s.kv.Get(ctx, candidate)
+		if err != nil {
+			continue
+		}
+		var op Operation
+		if err := json.Unmarshal(entry.Value(), &op); err != nil {
+			continue
+		}
+		if op.IdempotencyKey == key {
+			return &op, nil
+		}
+	}
+	return nil, fmt.Errorf("operation not found")
 }

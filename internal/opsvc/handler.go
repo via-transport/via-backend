@@ -14,6 +14,13 @@ func NewHandler(store Store) *Handler {
 	return &Handler{store: store}
 }
 
+func (h *Handler) Store() Store {
+	if h == nil {
+		return nil
+	}
+	return h.store
+}
+
 func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/operations/{id}", h.Get)
 }

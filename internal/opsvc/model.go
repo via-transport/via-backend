@@ -10,14 +10,15 @@ const (
 )
 
 type Operation struct {
-	ID           string    `json:"id"`
-	Type         string    `json:"type"`
-	Status       string    `json:"status"`
-	ResourceID   string    `json:"resource_id,omitempty"`
-	Message      string    `json:"message,omitempty"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID             string    `json:"id"`
+	Type           string    `json:"type"`
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+	Status         string    `json:"status"`
+	ResourceID     string    `json:"resource_id,omitempty"`
+	Message        string    `json:"message,omitempty"`
+	ErrorMessage   string    `json:"error_message,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type CommandAccepted struct {
@@ -25,4 +26,3 @@ type CommandAccepted struct {
 	Status      string `json:"status"`
 	Message     string `json:"message"`
 }
-
