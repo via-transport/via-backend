@@ -1,6 +1,7 @@
 package fleetsvc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,19 +15,57 @@ import (
 	"github.com/google/uuid"
 
 	"via-backend/internal/messaging"
+	"via-backend/internal/opsvc"
 	"via-backend/internal/tenantsvc"
 )
+
+const (
+	assignDriverCommandSubject   = "cmd.fleet.vehicle.assign_driver"
+	unassignDriverCommandSubject = "cmd.fleet.vehicle.unassign_driver"
+
+	assignDriverOperationType   = "vehicle.assign_driver"
+	unassignDriverOperationType = "vehicle.unassign_driver"
+)
+
+type assignDriverPayload struct {
+	FleetID     string `json:"fleet_id"`
+	DriverID    string `json:"driver_id"`
+	DriverName  string `json:"driver_name"`
+	DriverPhone string `json:"driver_phone"`
+}
+
+type assignDriverCommand struct {
+	OperationID string              `json:"operation_id"`
+	VehicleID   string              `json:"vehicle_id"`
+	Payload     assignDriverPayload `json:"payload"`
+}
+
+type unassignDriverPayload struct {
+	FleetID string `json:"fleet_id"`
+}
+
+type unassignDriverCommand struct {
+	OperationID string                `json:"operation_id"`
+	VehicleID   string                `json:"vehicle_id"`
+	Payload     unassignDriverPayload `json:"payload"`
+}
 
 // Handler exposes fleet CRUD endpoints.
 type Handler struct {
 	store  FleetStore
 	broker *messaging.Broker
 	policy *tenantsvc.Policy
+	ops    opsvc.Store
 }
 
 // NewHandler creates fleet handlers.
-func NewHandler(store FleetStore, broker *messaging.Broker, policy *tenantsvc.Policy) *Handler {
-	return &Handler{store: store, broker: broker, policy: policy}
+func NewHandler(
+	store FleetStore,
+	broker *messaging.Broker,
+	policy *tenantsvc.Policy,
+	opsStore opsvc.Store,
+) *Handler {
+	return &Handler{store: store, broker: broker, policy: policy, ops: opsStore}
 }
 
 // Mount registers all fleet routes on the mux.
@@ -58,6 +97,13 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/notices", h.ListNotices)
 	mux.HandleFunc("POST /api/v1/notices", h.CreateNotice)
 	mux.HandleFunc("PUT /api/v1/notices/{id}/read", h.MarkNoticeRead)
+}
+
+func (h *Handler) SubscribeCommands() error {
+	if err := h.subscribe(assignDriverCommandSubject, h.processAssignDriverCommand); err != nil {
+		return err
+	}
+	return h.subscribe(unassignDriverCommandSubject, h.processUnassignDriverCommand)
 }
 
 // ---------------------------------------------------------------------------
@@ -318,12 +364,7 @@ func (h *Handler) UpdateVehicleLocation(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) AssignDriver(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("id")
-	var body struct {
-		FleetID     string `json:"fleet_id"`
-		DriverID    string `json:"driver_id"`
-		DriverName  string `json:"driver_name"`
-		DriverPhone string `json:"driver_phone"`
-	}
+	var body assignDriverPayload
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
@@ -332,74 +373,30 @@ func (h *Handler) AssignDriver(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("fleet_id and driver_id required"))
 		return
 	}
-
-	v, err := h.store.GetVehicle(r.Context(), body.FleetID, vehicleID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+	cmd := &assignDriverCommand{
+		VehicleID: vehicleID,
+		Payload:   body,
+	}
+	if err := h.enqueueOperation(
+		r.Context(),
+		assignDriverOperationType,
+		"Vehicle assignment accepted for async processing.",
+		assignDriverCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-	previousDriverID := strings.TrimSpace(v.DriverID)
-	if previousDriverID != "" && !strings.EqualFold(previousDriverID, body.DriverID) {
-		if previousDriver, derr := h.store.GetDriver(r.Context(), body.FleetID, previousDriverID); derr == nil {
-			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
-			for _, id := range previousDriver.AssignedVehicleIDs {
-				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
-					filtered = append(filtered, id)
-				}
-			}
-			previousDriver.AssignedVehicleIDs = filtered
-			previousDriver.UpdatedAt = time.Now().UTC()
-			_ = h.store.PutDriver(r.Context(), previousDriver)
-		}
-	}
-
-	driverDetails, derr := h.store.GetDriver(r.Context(), body.FleetID, body.DriverID)
-	if derr != nil {
-		writeJSON(w, http.StatusNotFound, errBody("driver not found"))
-		return
-	}
-	if strings.TrimSpace(body.DriverName) == "" {
-		body.DriverName = driverDetails.FullName
-	}
-	if strings.TrimSpace(body.DriverPhone) == "" {
-		body.DriverPhone = driverDetails.Phone
-	}
-
-	v.DriverID = body.DriverID
-	v.DriverName = body.DriverName
-	v.DriverPhone = body.DriverPhone
-	if strings.TrimSpace(v.StatusMessage) == "" ||
-		strings.EqualFold(strings.TrimSpace(v.StatusMessage), "driver unassigned by owner") {
-		v.StatusMessage = "Driver assigned"
-	}
-	v.LastUpdated = time.Now().UTC()
-
-	if err := h.store.PutVehicle(r.Context(), v); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
-		return
-	}
-
-	// Also update the driver's assigned vehicles.
-	if !contains(driverDetails.AssignedVehicleIDs, vehicleID) {
-		driverDetails.AssignedVehicleIDs = append(driverDetails.AssignedVehicleIDs, vehicleID)
-		driverDetails.UpdatedAt = time.Now().UTC()
-		_ = h.store.PutDriver(r.Context(), driverDetails)
-	}
-
-	h.fanoutVehicleChange(
-		v.FleetID,
-		v.ID,
-		"driver_assigned",
-		buildDriverAssignmentMessage(v),
-	)
-	writeJSON(w, http.StatusOK, v)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Vehicle assignment queued.",
+	})
 }
 
 func (h *Handler) UnassignDriver(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("id")
-	var body struct {
-		FleetID string `json:"fleet_id"`
-	}
+	var body unassignDriverPayload
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
@@ -409,46 +406,25 @@ func (h *Handler) UnassignDriver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v, err := h.store.GetVehicle(r.Context(), body.FleetID, vehicleID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+	cmd := &unassignDriverCommand{
+		VehicleID: vehicleID,
+		Payload:   body,
+	}
+	if err := h.enqueueOperation(
+		r.Context(),
+		unassignDriverOperationType,
+		"Vehicle unassignment accepted for async processing.",
+		unassignDriverCommandSubject,
+		cmd,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("queue publish failed"))
 		return
 	}
-
-	previousDriverID := strings.TrimSpace(v.DriverID)
-	unassignmentMessage := buildDriverUnassignmentMessage(v)
-	if previousDriverID != "" {
-		if previousDriver, derr := h.store.GetDriver(r.Context(), body.FleetID, previousDriverID); derr == nil {
-			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
-			for _, id := range previousDriver.AssignedVehicleIDs {
-				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
-					filtered = append(filtered, id)
-				}
-			}
-			previousDriver.AssignedVehicleIDs = filtered
-			previousDriver.UpdatedAt = time.Now().UTC()
-			_ = h.store.PutDriver(r.Context(), previousDriver)
-		}
-	}
-
-	v.DriverID = ""
-	v.DriverName = ""
-	v.DriverPhone = ""
-	v.StatusMessage = "Driver unassigned by owner"
-	v.LastUpdated = time.Now().UTC()
-
-	if err := h.store.PutVehicle(r.Context(), v); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("update failed"))
-		return
-	}
-
-	h.fanoutVehicleChange(
-		v.FleetID,
-		v.ID,
-		"driver_unassigned",
-		unassignmentMessage,
-	)
-	writeJSON(w, http.StatusOK, v)
+	writeJSON(w, http.StatusAccepted, opsvc.CommandAccepted{
+		OperationID: cmd.OperationID,
+		Status:      opsvc.StatusQueued,
+		Message:     "Vehicle unassignment queued.",
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +745,251 @@ func (h *Handler) fanoutVehicleChange(
 	body, _ := json.Marshal(payload)
 	if err := h.broker.Publish(subject, body); err != nil {
 		log.Printf("[fleet] fanout %s: %v", subject, err)
+	}
+}
+
+func (h *Handler) subscribe(subject string, process func([]byte)) error {
+	ch := make(chan []byte, 64)
+	if _, err := h.broker.Subscribe(subject, ch); err != nil {
+		return err
+	}
+	go func() {
+		for payload := range ch {
+			process(payload)
+		}
+	}()
+	return nil
+}
+
+func (h *Handler) processAssignDriverCommand(payload []byte) {
+	var cmd assignDriverCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode assign command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, assignDriverOperationType)
+	h.markProcessing(ctx, op)
+
+	v, err := h.applyAssignDriver(ctx, cmd.VehicleID, cmd.Payload)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to assign vehicle driver.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, v.ID, "Vehicle assignment completed.")
+}
+
+func (h *Handler) processUnassignDriverCommand(payload []byte) {
+	var cmd unassignDriverCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		log.Printf("[fleet] decode unassign command: %v", err)
+		return
+	}
+	ctx := context.Background()
+	op := h.loadOperation(ctx, cmd.OperationID, unassignDriverOperationType)
+	h.markProcessing(ctx, op)
+
+	v, err := h.applyUnassignDriver(ctx, cmd.VehicleID, cmd.Payload)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to unassign vehicle driver.", err)
+		return
+	}
+
+	h.markSucceeded(ctx, op, v.ID, "Vehicle unassignment completed.")
+}
+
+func (h *Handler) applyAssignDriver(
+	ctx context.Context,
+	vehicleID string,
+	body assignDriverPayload,
+) (*Vehicle, error) {
+	v, err := h.store.GetVehicle(ctx, body.FleetID, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("vehicle not found")
+	}
+	previousDriverID := strings.TrimSpace(v.DriverID)
+	if previousDriverID != "" && !strings.EqualFold(previousDriverID, body.DriverID) {
+		if previousDriver, derr := h.store.GetDriver(ctx, body.FleetID, previousDriverID); derr == nil {
+			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
+			for _, id := range previousDriver.AssignedVehicleIDs {
+				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
+					filtered = append(filtered, id)
+				}
+			}
+			previousDriver.AssignedVehicleIDs = filtered
+			previousDriver.UpdatedAt = time.Now().UTC()
+			_ = h.store.PutDriver(ctx, previousDriver)
+		}
+	}
+
+	driverDetails, derr := h.store.GetDriver(ctx, body.FleetID, body.DriverID)
+	if derr != nil {
+		return nil, fmt.Errorf("driver not found")
+	}
+	if strings.TrimSpace(body.DriverName) == "" {
+		body.DriverName = driverDetails.FullName
+	}
+	if strings.TrimSpace(body.DriverPhone) == "" {
+		body.DriverPhone = driverDetails.Phone
+	}
+
+	v.DriverID = body.DriverID
+	v.DriverName = body.DriverName
+	v.DriverPhone = body.DriverPhone
+	if strings.TrimSpace(v.StatusMessage) == "" ||
+		strings.EqualFold(strings.TrimSpace(v.StatusMessage), "driver unassigned by owner") {
+		v.StatusMessage = "Driver assigned"
+	}
+	v.LastUpdated = time.Now().UTC()
+
+	if err := h.store.PutVehicle(ctx, v); err != nil {
+		return nil, fmt.Errorf("update failed")
+	}
+
+	if !contains(driverDetails.AssignedVehicleIDs, vehicleID) {
+		driverDetails.AssignedVehicleIDs = append(driverDetails.AssignedVehicleIDs, vehicleID)
+		driverDetails.UpdatedAt = time.Now().UTC()
+		_ = h.store.PutDriver(ctx, driverDetails)
+	}
+
+	h.fanoutVehicleChange(
+		v.FleetID,
+		v.ID,
+		"driver_assigned",
+		buildDriverAssignmentMessage(v),
+	)
+	return v, nil
+}
+
+func (h *Handler) applyUnassignDriver(
+	ctx context.Context,
+	vehicleID string,
+	body unassignDriverPayload,
+) (*Vehicle, error) {
+	v, err := h.store.GetVehicle(ctx, body.FleetID, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("vehicle not found")
+	}
+
+	previousDriverID := strings.TrimSpace(v.DriverID)
+	unassignmentMessage := buildDriverUnassignmentMessage(v)
+	if previousDriverID != "" {
+		if previousDriver, derr := h.store.GetDriver(ctx, body.FleetID, previousDriverID); derr == nil {
+			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
+			for _, id := range previousDriver.AssignedVehicleIDs {
+				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
+					filtered = append(filtered, id)
+				}
+			}
+			previousDriver.AssignedVehicleIDs = filtered
+			previousDriver.UpdatedAt = time.Now().UTC()
+			_ = h.store.PutDriver(ctx, previousDriver)
+		}
+	}
+
+	v.DriverID = ""
+	v.DriverName = ""
+	v.DriverPhone = ""
+	v.StatusMessage = "Driver unassigned by owner"
+	v.LastUpdated = time.Now().UTC()
+
+	if err := h.store.PutVehicle(ctx, v); err != nil {
+		return nil, fmt.Errorf("update failed")
+	}
+
+	h.fanoutVehicleChange(
+		v.FleetID,
+		v.ID,
+		"driver_unassigned",
+		unassignmentMessage,
+	)
+	return v, nil
+}
+
+func (h *Handler) enqueueOperation(
+	ctx context.Context,
+	opType string,
+	message string,
+	subject string,
+	command any,
+) error {
+	now := time.Now().UTC()
+	opID := uuid.NewString()
+	op := &opsvc.Operation{
+		ID:        opID,
+		Type:      opType,
+		Status:    opsvc.StatusQueued,
+		Message:   message,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := h.ops.Put(ctx, op); err != nil {
+		return err
+	}
+
+	switch cmd := command.(type) {
+	case *assignDriverCommand:
+		cmd.OperationID = opID
+	case *unassignDriverCommand:
+		cmd.OperationID = opID
+	}
+
+	payload, err := json.Marshal(command)
+	if err != nil {
+		h.markFailed(ctx, op, "Failed to queue command.", err)
+		return err
+	}
+	if err := h.broker.Publish(subject, payload); err != nil {
+		h.markFailed(ctx, op, "Failed to publish command.", err)
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) loadOperation(ctx context.Context, operationID, opType string) *opsvc.Operation {
+	op, err := h.ops.Get(ctx, operationID)
+	if err == nil {
+		return op
+	}
+	now := time.Now().UTC()
+	return &opsvc.Operation{
+		ID:        operationID,
+		Type:      opType,
+		Status:    opsvc.StatusQueued,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+func (h *Handler) markProcessing(ctx context.Context, op *opsvc.Operation) {
+	op.Status = opsvc.StatusProcessing
+	op.UpdatedAt = time.Now().UTC()
+	if err := h.ops.Put(ctx, op); err != nil {
+		log.Printf("[fleet] persist processing operation %s: %v", op.ID, err)
+	}
+}
+
+func (h *Handler) markSucceeded(ctx context.Context, op *opsvc.Operation, resourceID, message string) {
+	op.Status = opsvc.StatusSucceeded
+	op.ResourceID = resourceID
+	op.Message = message
+	op.ErrorMessage = ""
+	op.UpdatedAt = time.Now().UTC()
+	if err := h.ops.Put(ctx, op); err != nil {
+		log.Printf("[fleet] persist success operation %s: %v", op.ID, err)
+	}
+}
+
+func (h *Handler) markFailed(ctx context.Context, op *opsvc.Operation, message string, cause error) {
+	op.Status = opsvc.StatusFailed
+	op.Message = message
+	if cause != nil {
+		op.ErrorMessage = cause.Error()
+	}
+	op.UpdatedAt = time.Now().UTC()
+	if err := h.ops.Put(ctx, op); err != nil {
+		log.Printf("[fleet] persist failed operation %s: %v", op.ID, err)
 	}
 }
 

@@ -214,7 +214,10 @@ func main() {
 
 	tenantHandler := tenantsvc.NewHandler(tenantStore, tenantPolicy)
 
-	fleetHandler := fleetsvc.NewHandler(fleetStore, broker, tenantPolicy)
+	fleetHandler := fleetsvc.NewHandler(fleetStore, broker, tenantPolicy, operationStore)
+	if err := fleetHandler.SubscribeCommands(); err != nil {
+		log.Fatalf("[main] subscribe fleet commands: %v", err)
+	}
 
 	notifyHandler := notifysvc.NewHandler(notifyStore, broker)
 	notifyHandler.SubscribeNATS(broker)                  // cross-instance notification delivery
