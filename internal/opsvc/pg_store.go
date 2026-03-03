@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,6 +56,67 @@ func (s *PGStore) Get(ctx context.Context, id string) (*Operation, error) {
 		return nil, err
 	}
 	return &op, nil
+}
+
+func (s *PGStore) List(ctx context.Context, filter ListFilter) ([]Operation, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+
+	query := `
+		SELECT id, type, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
+		FROM operations
+	`
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 3)
+	argIndex := 1
+
+	if filter.Type != "" {
+		clauses = append(clauses, fmt.Sprintf("type=$%d", argIndex))
+		args = append(args, filter.Type)
+		argIndex++
+	}
+	if filter.Status != "" {
+		clauses = append(clauses, fmt.Sprintf("status=$%d", argIndex))
+		args = append(args, filter.Status)
+		argIndex++
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", argIndex)
+	args = append(args, limit)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Operation, 0, limit)
+	for rows.Next() {
+		var op Operation
+		if err := rows.Scan(
+			&op.ID,
+			&op.Type,
+			&op.IdempotencyKey,
+			&op.Status,
+			&op.ResourceID,
+			&op.Message,
+			&op.ErrorMessage,
+			&op.CreatedAt,
+			&op.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, op)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+
+	return items, nil
 }
 
 func (s *PGStore) FindByIdempotencyKey(ctx context.Context, key string) (*Operation, error) {

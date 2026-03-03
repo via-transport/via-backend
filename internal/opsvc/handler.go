@@ -3,6 +3,7 @@ package opsvc
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -22,7 +23,22 @@ func (h *Handler) Store() Store {
 }
 
 func (h *Handler) Mount(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/operations", h.List)
 	mux.HandleFunc("GET /api/v1/operations/{id}", h.Get)
+}
+
+func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	filter := ListFilter{
+		Limit:  parseLimit(r.URL.Query().Get("limit"), 20, 100),
+		Type:   strings.TrimSpace(r.URL.Query().Get("type")),
+		Status: strings.TrimSpace(r.URL.Query().Get("status")),
+	}
+	items, err := h.store.List(r.Context(), filter)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("failed to load operations"))
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
@@ -47,4 +63,22 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func errBody(msg string) map[string]string {
 	return map[string]string{"error": msg}
+}
+
+func parseLimit(raw string, fallback, max int) int {
+	if fallback <= 0 {
+		fallback = 20
+	}
+	limit := fallback
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return limit
+	}
+	if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+		limit = parsed
+	}
+	if limit > max {
+		return max
+	}
+	return limit
 }

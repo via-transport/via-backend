@@ -21,6 +21,12 @@ type Operation struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+type ListFilter struct {
+	Limit  int
+	Type   string
+	Status string
+}
+
 type CommandAccepted struct {
 	OperationID string `json:"operation_id"`
 	Status      string `json:"status"`
