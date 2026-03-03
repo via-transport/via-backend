@@ -34,6 +34,7 @@ type createJoinRequestCommand struct {
 type joinRequestDecisionCommand struct {
 	OperationID string `json:"operation_id"`
 	RequestID   string `json:"request_id"`
+	FleetID     string `json:"fleet_id,omitempty"`
 }
 
 // Handler provides subscription REST endpoints.
@@ -246,6 +247,9 @@ func (h *Handler) ApproveJoinRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := joinRequestDecisionCommand{RequestID: subID}
+	if existing, err := h.store.GetByID(r.Context(), subID); err == nil && existing != nil {
+		cmd.FleetID = strings.TrimSpace(existing.FleetID)
+	}
 	if err := h.enqueueCommand(
 		r.Context(),
 		joinRequestApproveOperationType,
@@ -273,6 +277,9 @@ func (h *Handler) DenyJoinRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := joinRequestDecisionCommand{RequestID: subID}
+	if existing, err := h.store.GetByID(r.Context(), subID); err == nil && existing != nil {
+		cmd.FleetID = strings.TrimSpace(existing.FleetID)
+	}
 	if err := h.enqueueCommand(
 		r.Context(),
 		joinRequestDenyOperationType,
@@ -531,6 +538,7 @@ func (h *Handler) enqueueCommand(
 	op := &opsvc.Operation{
 		ID:             opID,
 		Type:           opType,
+		FleetID:        fleetIDFromJoinCommand(command),
 		IdempotencyKey: idempotencyKey,
 		Status:         opsvc.StatusQueued,
 		Message:        message,
@@ -573,6 +581,17 @@ func (h *Handler) loadOperation(ctx context.Context, operationID, opType string)
 		Status:    opsvc.StatusQueued,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+}
+
+func fleetIDFromJoinCommand(command any) string {
+	switch cmd := command.(type) {
+	case *createJoinRequestCommand:
+		return strings.TrimSpace(cmd.Subscription.FleetID)
+	case *joinRequestDecisionCommand:
+		return strings.TrimSpace(cmd.FleetID)
+	default:
+		return ""
 	}
 }
 

@@ -23,12 +23,12 @@ var _ Store = (*PGStore)(nil)
 func (s *PGStore) Put(ctx context.Context, op *Operation) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO operations (
-			id, type, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			id, type, fleet_id, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (id) DO UPDATE SET
-			type=$2, idempotency_key=$3, status=$4, resource_id=$5, message=$6, error_message=$7, updated_at=$9
+			type=$2, fleet_id=$3, idempotency_key=$4, status=$5, resource_id=$6, message=$7, error_message=$8, updated_at=$10
 	`,
-		op.ID, op.Type, op.IdempotencyKey, op.Status, op.ResourceID, op.Message, op.ErrorMessage, op.CreatedAt, op.UpdatedAt,
+		op.ID, op.Type, op.FleetID, op.IdempotencyKey, op.Status, op.ResourceID, op.Message, op.ErrorMessage, op.CreatedAt, op.UpdatedAt,
 	)
 	return err
 }
@@ -36,12 +36,13 @@ func (s *PGStore) Put(ctx context.Context, op *Operation) error {
 func (s *PGStore) Get(ctx context.Context, id string) (*Operation, error) {
 	var op Operation
 	if err := s.pool.QueryRow(ctx, `
-		SELECT id, type, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
+		SELECT id, type, fleet_id, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
 		FROM operations
 		WHERE id=$1
 	`, id).Scan(
 		&op.ID,
 		&op.Type,
+		&op.FleetID,
 		&op.IdempotencyKey,
 		&op.Status,
 		&op.ResourceID,
@@ -65,11 +66,11 @@ func (s *PGStore) List(ctx context.Context, filter ListFilter) ([]Operation, err
 	}
 
 	query := `
-		SELECT id, type, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
+		SELECT id, type, fleet_id, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
 		FROM operations
 	`
-	clauses := make([]string, 0, 2)
-	args := make([]any, 0, 3)
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 4)
 	argIndex := 1
 
 	if filter.Type != "" {
@@ -80,6 +81,11 @@ func (s *PGStore) List(ctx context.Context, filter ListFilter) ([]Operation, err
 	if filter.Status != "" {
 		clauses = append(clauses, fmt.Sprintf("status=$%d", argIndex))
 		args = append(args, filter.Status)
+		argIndex++
+	}
+	if filter.FleetID != "" {
+		clauses = append(clauses, fmt.Sprintf("fleet_id=$%d", argIndex))
+		args = append(args, filter.FleetID)
 		argIndex++
 	}
 	if len(clauses) > 0 {
@@ -100,6 +106,7 @@ func (s *PGStore) List(ctx context.Context, filter ListFilter) ([]Operation, err
 		if err := rows.Scan(
 			&op.ID,
 			&op.Type,
+			&op.FleetID,
 			&op.IdempotencyKey,
 			&op.Status,
 			&op.ResourceID,
@@ -122,7 +129,7 @@ func (s *PGStore) List(ctx context.Context, filter ListFilter) ([]Operation, err
 func (s *PGStore) FindByIdempotencyKey(ctx context.Context, key string) (*Operation, error) {
 	var op Operation
 	if err := s.pool.QueryRow(ctx, `
-		SELECT id, type, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
+		SELECT id, type, fleet_id, idempotency_key, status, resource_id, message, error_message, created_at, updated_at
 		FROM operations
 		WHERE idempotency_key=$1
 		ORDER BY created_at DESC
@@ -130,6 +137,7 @@ func (s *PGStore) FindByIdempotencyKey(ctx context.Context, key string) (*Operat
 	`, key).Scan(
 		&op.ID,
 		&op.Type,
+		&op.FleetID,
 		&op.IdempotencyKey,
 		&op.Status,
 		&op.ResourceID,

@@ -66,6 +66,9 @@ func (s *KVStore) List(ctx context.Context, filter ListFilter) ([]Operation, err
 		if filter.Status != "" && op.Status != filter.Status {
 			continue
 		}
+		if filter.FleetID != "" && op.FleetID != filter.FleetID {
+			continue
+		}
 		items = append(items, op)
 	}
 

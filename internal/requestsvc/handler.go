@@ -33,6 +33,7 @@ type createDriverRequestCommand struct {
 type driverRequestDecisionCommand struct {
 	OperationID string `json:"operation_id"`
 	RequestID   string `json:"request_id"`
+	FleetID     string `json:"fleet_id,omitempty"`
 }
 
 type Handler struct {
@@ -140,6 +141,9 @@ func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := driverRequestDecisionCommand{RequestID: reqID}
+	if existing, err := h.store.Get(r.Context(), reqID); err == nil && existing != nil {
+		cmd.FleetID = strings.TrimSpace(existing.FleetID)
+	}
 	if err := h.enqueueCommand(
 		r.Context(),
 		driverRequestApproveOperationType,
@@ -167,6 +171,9 @@ func (h *Handler) Deny(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := driverRequestDecisionCommand{RequestID: reqID}
+	if existing, err := h.store.Get(r.Context(), reqID); err == nil && existing != nil {
+		cmd.FleetID = strings.TrimSpace(existing.FleetID)
+	}
 	if err := h.enqueueCommand(
 		r.Context(),
 		driverRequestDenyOperationType,
@@ -349,6 +356,7 @@ func (h *Handler) enqueueCommand(
 	op := &opsvc.Operation{
 		ID:             opID,
 		Type:           opType,
+		FleetID:        fleetIDFromRequestCommand(command),
 		IdempotencyKey: idempotencyKey,
 		Status:         opsvc.StatusQueued,
 		Message:        message,
@@ -391,6 +399,17 @@ func (h *Handler) loadOperation(ctx context.Context, operationID, opType string)
 		Status:    opsvc.StatusQueued,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+}
+
+func fleetIDFromRequestCommand(command any) string {
+	switch cmd := command.(type) {
+	case *createDriverRequestCommand:
+		return strings.TrimSpace(cmd.Request.FleetID)
+	case *driverRequestDecisionCommand:
+		return strings.TrimSpace(cmd.FleetID)
+	default:
+		return ""
 	}
 }
 

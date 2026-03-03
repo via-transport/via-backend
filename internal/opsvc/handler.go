@@ -29,9 +29,10 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	filter := ListFilter{
-		Limit:  parseLimit(r.URL.Query().Get("limit"), 20, 100),
-		Type:   strings.TrimSpace(r.URL.Query().Get("type")),
-		Status: strings.TrimSpace(r.URL.Query().Get("status")),
+		Limit:   parseLimit(r.URL.Query().Get("limit"), 20, 100),
+		Type:    strings.TrimSpace(r.URL.Query().Get("type")),
+		Status:  strings.TrimSpace(r.URL.Query().Get("status")),
+		FleetID: strings.TrimSpace(r.URL.Query().Get("fleet_id")),
 	}
 	items, err := h.store.List(r.Context(), filter)
 	if err != nil {

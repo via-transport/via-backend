@@ -12,6 +12,7 @@ const (
 type Operation struct {
 	ID             string    `json:"id"`
 	Type           string    `json:"type"`
+	FleetID        string    `json:"fleet_id,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 	Status         string    `json:"status"`
 	ResourceID     string    `json:"resource_id,omitempty"`
@@ -22,9 +23,10 @@ type Operation struct {
 }
 
 type ListFilter struct {
-	Limit  int
-	Type   string
-	Status string
+	Limit   int
+	Type    string
+	Status  string
+	FleetID string
 }
 
 type CommandAccepted struct {

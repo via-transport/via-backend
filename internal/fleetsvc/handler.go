@@ -1647,6 +1647,7 @@ func (h *Handler) enqueueOperation(
 	op := &opsvc.Operation{
 		ID:             opID,
 		Type:           opType,
+		FleetID:        fleetIDFromFleetCommand(command),
 		IdempotencyKey: idempotencyKey,
 		Status:         opsvc.StatusQueued,
 		Message:        message,
@@ -1713,6 +1714,41 @@ func (h *Handler) loadOperation(ctx context.Context, operationID, opType string)
 		Status:    opsvc.StatusQueued,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+}
+
+func fleetIDFromFleetCommand(command any) string {
+	switch cmd := command.(type) {
+	case *createVehicleCommand:
+		return strings.TrimSpace(cmd.Vehicle.FleetID)
+	case *updateVehicleCommand:
+		return strings.TrimSpace(cmd.FleetID)
+	case *deleteVehicleCommand:
+		return strings.TrimSpace(cmd.FleetID)
+	case *updateVehicleStatusCommand:
+		return strings.TrimSpace(cmd.Payload.FleetID)
+	case *updateVehicleLocationCommand:
+		return strings.TrimSpace(cmd.Payload.FleetID)
+	case *createDriverCommand:
+		return strings.TrimSpace(cmd.Driver.FleetID)
+	case *updateDriverCommand:
+		return strings.TrimSpace(cmd.FleetID)
+	case *deleteDriverCommand:
+		return strings.TrimSpace(cmd.FleetID)
+	case *createEventCommand:
+		return strings.TrimSpace(cmd.Event.FleetID)
+	case *updateEventCommand:
+		return ""
+	case *createNoticeCommand:
+		return strings.TrimSpace(cmd.Notice.FleetID)
+	case *markNoticeReadCommand:
+		return ""
+	case *assignDriverCommand:
+		return strings.TrimSpace(cmd.Payload.FleetID)
+	case *unassignDriverCommand:
+		return strings.TrimSpace(cmd.Payload.FleetID)
+	default:
+		return ""
 	}
 }
 
