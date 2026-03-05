@@ -14,7 +14,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"via-backend/internal/auth"
+	"via-backend/internal/authsvc"
 	"via-backend/internal/messaging"
+	"via-backend/internal/notifysvc"
 	"via-backend/internal/opsvc"
 	"via-backend/internal/tenantsvc"
 )
@@ -34,6 +37,7 @@ const (
 	markNoticeReadCommandSubject        = "cmd.fleet.notice.mark_read"
 	assignDriverCommandSubject          = "cmd.fleet.vehicle.assign_driver"
 	unassignDriverCommandSubject        = "cmd.fleet.vehicle.unassign_driver"
+	driverAccessRevokedEventSubject     = "evt.driver.access.revoked"
 
 	createVehicleOperationType         = "vehicle.create"
 	updateVehicleOperationType         = "vehicle.update"
@@ -154,12 +158,19 @@ type unassignDriverCommand struct {
 	Payload     unassignDriverPayload `json:"payload"`
 }
 
+type driverAccessRevokedEvent struct {
+	FleetID  string `json:"fleet_id"`
+	DriverID string `json:"driver_id"`
+}
+
 // Handler exposes fleet CRUD endpoints.
 type Handler struct {
-	store  FleetStore
-	broker *messaging.Broker
-	policy *tenantsvc.Policy
-	ops    opsvc.Store
+	store       FleetStore
+	broker      *messaging.Broker
+	policy      *tenantsvc.Policy
+	ops         opsvc.Store
+	notifyStore notifysvc.NotifStore
+	userStore   authsvc.UserStore
 }
 
 // NewHandler creates fleet handlers.
@@ -168,8 +179,17 @@ func NewHandler(
 	broker *messaging.Broker,
 	policy *tenantsvc.Policy,
 	opsStore opsvc.Store,
+	notifyStore notifysvc.NotifStore,
+	userStore authsvc.UserStore,
 ) *Handler {
-	return &Handler{store: store, broker: broker, policy: policy, ops: opsStore}
+	return &Handler{
+		store:       store,
+		broker:      broker,
+		policy:      policy,
+		ops:         opsStore,
+		notifyStore: notifyStore,
+		userStore:   userStore,
+	}
 }
 
 // Mount registers all fleet routes on the mux.
@@ -251,13 +271,32 @@ func (h *Handler) SubscribeCommands() error {
 // ---------------------------------------------------------------------------
 
 func (h *Handler) ListVehicles(w http.ResponseWriter, r *http.Request) {
-	fleetID := r.URL.Query().Get("fleet_id")
-	driverID := r.URL.Query().Get("driver_id")
+	queryValues := r.URL.Query()
+	fleetID := strings.TrimSpace(queryValues.Get("fleet_id"))
+	driverIDValues, hasDriverFilter := queryValues["driver_id"]
+	driverID := ""
+	if hasDriverFilter && len(driverIDValues) > 0 {
+		driverID = strings.TrimSpace(driverIDValues[0])
+	}
+	routeID := strings.TrimSpace(queryValues.Get("route_id"))
+	if routeID == "" {
+		routeID = strings.TrimSpace(queryValues.Get("routeId"))
+	}
+	query := strings.ToLower(strings.TrimSpace(queryValues.Get("query")))
 	limit, offset := parsePagination(r)
+	identity := auth.IdentityFromContext(r.Context())
+	if identity.Role == auth.RoleDriver && fleetID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required for driver vehicle lookup"))
+		return
+	}
+	if hasDriverFilter && driverID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("driver_id cannot be empty"))
+		return
+	}
 
 	var vehicles []Vehicle
 	var err error
-	if driverID != "" {
+	if hasDriverFilter {
 		vehicles, err = h.store.ListVehiclesForDriver(r.Context(), fleetID, driverID)
 	} else {
 		vehicles, err = h.store.ListVehicles(r.Context(), fleetID)
@@ -269,16 +308,42 @@ func (h *Handler) ListVehicles(w http.ResponseWriter, r *http.Request) {
 	if vehicles == nil {
 		vehicles = []Vehicle{}
 	}
+	if routeID != "" {
+		filtered := make([]Vehicle, 0, len(vehicles))
+		for _, vehicle := range vehicles {
+			if strings.EqualFold(strings.TrimSpace(vehicle.CurrentRouteID), routeID) {
+				filtered = append(filtered, vehicle)
+			}
+		}
+		vehicles = filtered
+	}
+	if query != "" {
+		filtered := make([]Vehicle, 0, len(vehicles))
+		for _, vehicle := range vehicles {
+			if matchesVehicleQuery(vehicle, query) {
+				filtered = append(filtered, vehicle)
+			}
+		}
+		vehicles = filtered
+	}
 	sort.Slice(vehicles, func(i, j int) bool {
 		return vehicles[i].LastUpdated.After(vehicles[j].LastUpdated)
 	})
+	if h.shouldRedactVehicleDetails(r.Context(), identity, fleetID) {
+		vehicles = sanitizeVehiclesForUnapprovedDriver(vehicles)
+	}
 	vehicles = paginate(vehicles, limit, offset)
 	writeJSON(w, http.StatusOK, vehicles)
 }
 
 func (h *Handler) GetVehicle(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("id")
-	fleetID := r.URL.Query().Get("fleet_id")
+	fleetID := strings.TrimSpace(r.URL.Query().Get("fleet_id"))
+	identity := auth.IdentityFromContext(r.Context())
+	if identity.Role == auth.RoleDriver && fleetID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required for driver vehicle lookup"))
+		return
+	}
 	if fleetID == "" {
 		// Try to find in any fleet by iterating.
 		v := h.findVehicleAnyFleet(r, vehicleID)
@@ -294,6 +359,15 @@ func (h *Handler) GetVehicle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
 		return
 	}
+	if h.shouldRedactVehicleDetails(r.Context(), identity, fleetID) {
+		if !v.IsActive || strings.TrimSpace(v.DriverID) != "" {
+			writeJSON(w, http.StatusNotFound, errBody("vehicle not found"))
+			return
+		}
+		redacted := sanitizeVehicleForUnapprovedDriver(*v)
+		writeJSON(w, http.StatusOK, redacted)
+		return
+	}
 	writeJSON(w, http.StatusOK, v)
 }
 
@@ -303,8 +377,16 @@ func (h *Handler) CreateVehicle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
+	v.FleetID = strings.TrimSpace(v.FleetID)
+	v.RegistrationNumber = strings.TrimSpace(v.RegistrationNumber)
+	v.Nickname = strings.TrimSpace(v.Nickname)
+	v.CurrentRouteID = strings.TrimSpace(v.CurrentRouteID)
 	if v.FleetID == "" || v.RegistrationNumber == "" {
-		writeJSON(w, http.StatusBadRequest, errBody("fleet_id and registration_number required"))
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			errBody("fleet_id and registration_number required"),
+		)
 		return
 	}
 	cmd := &createVehicleCommand{Vehicle: v}
@@ -845,6 +927,9 @@ func (h *Handler) fanoutVehicleChange(
 	fleetID, vehicleID, event string,
 	messageParts ...string,
 ) {
+	if h.broker == nil || h.broker.NC == nil {
+		return
+	}
 	subject := "fleet." + fleetID + ".vehicle." + vehicleID + ".ops." + event
 	payload := map[string]string{
 		"fleet_id":   fleetID,
@@ -861,6 +946,29 @@ func (h *Handler) fanoutVehicleChange(
 	body, _ := json.Marshal(payload)
 	if err := h.broker.Publish(subject, body); err != nil {
 		log.Printf("[fleet] fanout %s: %v", subject, err)
+	}
+}
+
+func (h *Handler) publishDriverAccessRevokedEvent(fleetID, driverID string) {
+	if h.broker == nil || h.broker.NC == nil {
+		return
+	}
+
+	normalizedFleetID := strings.TrimSpace(fleetID)
+	normalizedDriverID := strings.TrimSpace(driverID)
+	if normalizedFleetID == "" || normalizedDriverID == "" {
+		return
+	}
+
+	payload, err := json.Marshal(driverAccessRevokedEvent{
+		FleetID:  normalizedFleetID,
+		DriverID: normalizedDriverID,
+	})
+	if err != nil {
+		return
+	}
+	if err := h.broker.Publish(driverAccessRevokedEventSubject, payload); err != nil {
+		log.Printf("[fleet] publish %s: %v", driverAccessRevokedEventSubject, err)
 	}
 }
 
@@ -1145,6 +1253,9 @@ func (h *Handler) applyCreateVehicle(ctx context.Context, v Vehicle) (*Vehicle, 
 	if v.ID == "" {
 		v.ID = uuid.NewString()
 	}
+	if strings.TrimSpace(v.Nickname) == "" {
+		v.Nickname = strings.TrimSpace(v.RegistrationNumber)
+	}
 	now := time.Now().UTC()
 	v.CreatedAt = now
 	v.LastUpdated = now
@@ -1152,6 +1263,27 @@ func (h *Handler) applyCreateVehicle(ctx context.Context, v Vehicle) (*Vehicle, 
 		v.Status = "idle"
 	}
 	if h.policy != nil {
+		if creator, ok := h.store.(VehicleLimitEnforcer); ok {
+			view, err := h.policy.EnsureRealtimeAllowed(ctx, v.FleetID)
+			if err != nil {
+				return nil, err
+			}
+			vehicleLimit := 0
+			if view.EffectiveStatus == tenantsvc.StatusTrial {
+				vehicleLimit = view.VehicleLimit
+			}
+			if err := creator.CreateVehicleIfWithinLimit(ctx, &v, vehicleLimit); err != nil {
+				if err == ErrVehicleLimitReached {
+					return nil, &tenantsvc.PolicyError{
+						HTTPStatus: http.StatusForbidden,
+						Code:       "vehicle_limit_reached",
+						Message:    ErrVehicleLimitReached.Error(),
+					}
+				}
+				return nil, fmt.Errorf("create failed")
+			}
+			return &v, nil
+		}
 		existing, err := h.store.ListVehicles(ctx, v.FleetID)
 		if err != nil {
 			return nil, fmt.Errorf("quota lookup failed")
@@ -1186,6 +1318,16 @@ func (h *Handler) applyUpdateVehicle(
 		var value string
 		if err := json.Unmarshal(raw, &value); err == nil && strings.TrimSpace(value) != "" {
 			existing.RegistrationNumber = value
+		}
+	}
+	if raw, ok := rawFields["nickname"]; ok {
+		var value *string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			if value == nil {
+				existing.Nickname = ""
+			} else {
+				existing.Nickname = strings.TrimSpace(*value)
+			}
 		}
 	}
 	if raw, ok := rawFields["type"]; ok {
@@ -1371,9 +1513,51 @@ func (h *Handler) applyUpdateDriver(
 }
 
 func (h *Handler) applyDeleteDriver(ctx context.Context, driverID string, fleetID string) error {
+	now := time.Now().UTC()
+	driverEmail := ""
+	if existingDriver, derr := h.store.GetDriver(ctx, fleetID, driverID); derr == nil {
+		driverEmail = existingDriver.Email
+	}
+	assignedVehicles, err := h.store.ListVehiclesForDriver(ctx, fleetID, driverID)
+	if err == nil {
+		for i := range assignedVehicles {
+			assigned := assignedVehicles[i]
+			unassignmentMessage := buildDriverUnassignmentMessage(&assigned)
+			assigned.DriverID = ""
+			assigned.DriverName = ""
+			assigned.DriverPhone = ""
+			assigned.StatusMessage = "Driver left fleet"
+			assigned.LastUpdated = now
+			if err := h.store.PutVehicle(ctx, &assigned); err == nil {
+				h.fanoutVehicleChange(
+					assigned.FleetID,
+					assigned.ID,
+					"driver_unassigned",
+					unassignmentMessage,
+				)
+			}
+		}
+	}
+
 	if err := h.store.DeleteDriver(ctx, fleetID, driverID); err != nil {
 		return fmt.Errorf("driver not found")
 	}
+
+	h.pushDriverNotificationToRecipients(
+		ctx,
+		h.resolveDriverNotificationRecipients(ctx, driverID, driverEmail),
+		&notifysvc.Notification{
+			FleetID: strings.TrimSpace(fleetID),
+			Type:    "driver_access_update",
+			Title:   "Fleet Access Removed",
+			Body: "You are no longer attached to this fleet. " +
+				"Choose a new owner and request access before operating again.",
+			Data: map[string]string{
+				"event_type": "driver_access_removed",
+			},
+		},
+	)
+	h.publishDriverAccessRevokedEvent(fleetID, driverID)
 	return nil
 }
 
@@ -1413,12 +1597,9 @@ func (h *Handler) applyUpdateVehicleLocation(
 	if err != nil {
 		return nil, fmt.Errorf("vehicle not found")
 	}
-	v.CurrentLocation = &body.Location
-	v.LastUpdated = time.Now().UTC()
-
-	if err := h.store.PutVehicle(ctx, v); err != nil {
-		return nil, fmt.Errorf("update failed")
-	}
+	// Live location is transported through NATS/JetStream and cached there.
+	// Keep the legacy endpoint backward compatible without writing GPS churn
+	// into the durable vehicle record.
 	return v, nil
 }
 
@@ -1494,6 +1675,7 @@ func (h *Handler) applyAssignDriver(
 	vehicleID string,
 	body assignDriverPayload,
 ) (*Vehicle, error) {
+	now := time.Now().UTC()
 	v, err := h.store.GetVehicle(ctx, body.FleetID, vehicleID)
 	if err != nil {
 		return nil, fmt.Errorf("vehicle not found")
@@ -1524,6 +1706,30 @@ func (h *Handler) applyAssignDriver(
 		body.DriverPhone = driverDetails.Phone
 	}
 
+	currentAssignments, err := h.store.ListVehiclesForDriver(ctx, body.FleetID, body.DriverID)
+	if err == nil {
+		for i := range currentAssignments {
+			assigned := currentAssignments[i]
+			if strings.EqualFold(strings.TrimSpace(assigned.ID), vehicleID) {
+				continue
+			}
+			unassignmentMessage := buildDriverUnassignmentMessage(&assigned)
+			assigned.DriverID = ""
+			assigned.DriverName = ""
+			assigned.DriverPhone = ""
+			assigned.StatusMessage = "Driver moved to another vehicle"
+			assigned.LastUpdated = now
+			if err := h.store.PutVehicle(ctx, &assigned); err == nil {
+				h.fanoutVehicleChange(
+					assigned.FleetID,
+					assigned.ID,
+					"driver_unassigned",
+					unassignmentMessage,
+				)
+			}
+		}
+	}
+
 	v.DriverID = body.DriverID
 	v.DriverName = body.DriverName
 	v.DriverPhone = body.DriverPhone
@@ -1531,17 +1737,43 @@ func (h *Handler) applyAssignDriver(
 		strings.EqualFold(strings.TrimSpace(v.StatusMessage), "driver unassigned by owner") {
 		v.StatusMessage = "Driver assigned"
 	}
-	v.LastUpdated = time.Now().UTC()
+	v.LastUpdated = now
 
 	if err := h.store.PutVehicle(ctx, v); err != nil {
 		return nil, fmt.Errorf("update failed")
 	}
 
-	if !contains(driverDetails.AssignedVehicleIDs, vehicleID) {
-		driverDetails.AssignedVehicleIDs = append(driverDetails.AssignedVehicleIDs, vehicleID)
-		driverDetails.UpdatedAt = time.Now().UTC()
-		_ = h.store.PutDriver(ctx, driverDetails)
-	}
+	driverDetails.AssignedVehicleIDs = []string{vehicleID}
+	driverDetails.UpdatedAt = now
+	_ = h.store.PutDriver(ctx, driverDetails)
+
+	assignmentMessage := "You can now operate " + vehicleDisplayLabel(v) + ". Driver controls are enabled again."
+	_ = h.store.PutNotice(ctx, &DriverNotice{
+		ID:        uuid.NewString(),
+		Title:     "Vehicle Assignment",
+		Message:   assignmentMessage,
+		VehicleID: v.ID,
+		DriverID:  body.DriverID,
+		FleetID:   v.FleetID,
+		Priority:  "high",
+		IsRead:    false,
+		Timestamp: now,
+	})
+	h.pushDriverNotificationToRecipients(
+		ctx,
+		h.resolveDriverNotificationRecipients(ctx, body.DriverID, driverDetails.Email),
+		&notifysvc.Notification{
+			FleetID:   strings.TrimSpace(v.FleetID),
+			VehicleID: strings.TrimSpace(v.ID),
+			Type:      "driver_access_update",
+			Title:     "Vehicle Assignment",
+			Body:      assignmentMessage,
+			Data: map[string]string{
+				"event_type": "driver_vehicle_assignment_approved",
+				"vehicle_id": strings.TrimSpace(v.ID),
+			},
+		},
+	)
 
 	h.fanoutVehicleChange(
 		v.FleetID,
@@ -1563,9 +1795,11 @@ func (h *Handler) applyUnassignDriver(
 	}
 
 	previousDriverID := strings.TrimSpace(v.DriverID)
+	previousDriverEmail := ""
 	unassignmentMessage := buildDriverUnassignmentMessage(v)
 	if previousDriverID != "" {
 		if previousDriver, derr := h.store.GetDriver(ctx, body.FleetID, previousDriverID); derr == nil {
+			previousDriverEmail = previousDriver.Email
 			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
 			for _, id := range previousDriver.AssignedVehicleIDs {
 				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
@@ -1588,6 +1822,35 @@ func (h *Handler) applyUnassignDriver(
 		return nil, fmt.Errorf("update failed")
 	}
 
+	if previousDriverID != "" {
+		_ = h.store.PutNotice(ctx, &DriverNotice{
+			ID:        uuid.NewString(),
+			Title:     "Vehicle Unassigned",
+			Message:   "You have been unassigned from " + vehicleDisplayLabel(v) + ". Trip controls are locked until a new assignment is made.",
+			VehicleID: v.ID,
+			DriverID:  previousDriverID,
+			FleetID:   v.FleetID,
+			Priority:  "high",
+			IsRead:    false,
+			Timestamp: v.LastUpdated,
+		})
+		h.pushDriverNotificationToRecipients(
+			ctx,
+			h.resolveDriverNotificationRecipients(ctx, previousDriverID, previousDriverEmail),
+			&notifysvc.Notification{
+				FleetID:   strings.TrimSpace(v.FleetID),
+				VehicleID: strings.TrimSpace(v.ID),
+				Type:      "driver_access_update",
+				Title:     "Vehicle Unassigned",
+				Body:      "You have been unassigned from " + vehicleDisplayLabel(v) + ". Trip controls are locked until a new assignment is made.",
+				Data: map[string]string{
+					"event_type": "driver_unassigned",
+					"vehicle_id": strings.TrimSpace(v.ID),
+				},
+			},
+		)
+	}
+
 	h.fanoutVehicleChange(
 		v.FleetID,
 		v.ID,
@@ -1595,6 +1858,109 @@ func (h *Handler) applyUnassignDriver(
 		unassignmentMessage,
 	)
 	return v, nil
+}
+
+func (h *Handler) resolveDriverNotificationRecipients(
+	ctx context.Context,
+	driverID string,
+	driverEmail string,
+) []string {
+	seen := map[string]struct{}{}
+	recipients := make([]string, 0, 2)
+	addRecipient := func(id string) {
+		normalized := strings.TrimSpace(id)
+		if normalized == "" {
+			return
+		}
+		if _, ok := seen[normalized]; ok {
+			return
+		}
+		seen[normalized] = struct{}{}
+		recipients = append(recipients, normalized)
+	}
+
+	addRecipient(driverID)
+
+	if h.userStore != nil {
+		normalizedEmail := strings.ToLower(strings.TrimSpace(driverEmail))
+		if normalizedEmail != "" {
+			if user, err := h.userStore.GetUserByEmail(ctx, normalizedEmail); err == nil && user != nil {
+				addRecipient(user.ID)
+			}
+		}
+	}
+
+	return recipients
+}
+
+func (h *Handler) pushDriverNotificationToRecipients(
+	ctx context.Context,
+	recipients []string,
+	template *notifysvc.Notification,
+) {
+	if template == nil {
+		return
+	}
+	for _, recipient := range recipients {
+		data := map[string]string{}
+		for key, value := range template.Data {
+			data[key] = value
+		}
+		h.pushDriverNotification(ctx, &notifysvc.Notification{
+			UserID:    recipient,
+			FleetID:   strings.TrimSpace(template.FleetID),
+			VehicleID: strings.TrimSpace(template.VehicleID),
+			Type:      template.Type,
+			Title:     template.Title,
+			Body:      template.Body,
+			Data:      data,
+		})
+	}
+}
+
+func (h *Handler) pushDriverNotification(ctx context.Context, n *notifysvc.Notification) {
+	if h.notifyStore == nil || n == nil {
+		return
+	}
+
+	n.UserID = strings.TrimSpace(n.UserID)
+	if n.UserID == "" {
+		return
+	}
+	if strings.TrimSpace(n.ID) == "" {
+		n.ID = uuid.NewString()
+	}
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = time.Now().UTC()
+	}
+	n.IsRead = false
+
+	if err := h.notifyStore.Put(ctx, n); err != nil {
+		log.Printf("[fleet] store driver notification for %s: %v", n.UserID, err)
+		return
+	}
+
+	unread, err := h.notifyStore.CountUnread(ctx, n.UserID)
+	if err != nil {
+		unread = 0
+	}
+
+	payload := notifysvc.NotificationPayload{
+		Action:       "new",
+		Notification: n,
+		UnreadCount:  unread,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	if h.broker != nil {
+		subject := "notify." + n.UserID
+		if err := h.broker.Publish(subject, data); err != nil {
+			log.Printf("[fleet] publish driver notification %s: %v", subject, err)
+		}
+	}
 }
 
 func (h *Handler) enqueueOperation(
@@ -1695,9 +2061,11 @@ func (h *Handler) enqueueOperation(
 		h.markFailed(ctx, op, "Failed to queue command.", err)
 		return err
 	}
-	if err := h.broker.Publish(subject, payload); err != nil {
-		h.markFailed(ctx, op, "Failed to publish command.", err)
-		return err
+	if h.broker != nil {
+		if err := h.broker.Publish(subject, payload); err != nil {
+			h.markFailed(ctx, op, "Failed to publish command.", err)
+			return err
+		}
 	}
 	return nil
 }
@@ -1899,6 +2267,67 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func matchesVehicleQuery(vehicle Vehicle, query string) bool {
+	if query == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		vehicle.ID,
+		vehicle.RegistrationNumber,
+		vehicle.Nickname,
+		vehicle.CurrentRouteID,
+		vehicle.DriverName,
+		vehicle.DriverPhone,
+		vehicle.Status,
+		vehicle.StatusMessage,
+		vehicle.Type,
+		vehicle.ServiceType,
+	}, " "))
+	return strings.Contains(haystack, query)
+}
+
+func (h *Handler) shouldRedactVehicleDetails(
+	ctx context.Context,
+	identity auth.Identity,
+	fleetID string,
+) bool {
+	if identity.Role != auth.RoleDriver {
+		return false
+	}
+	if strings.TrimSpace(fleetID) == "" {
+		return true
+	}
+	_, err := h.store.GetDriver(ctx, fleetID, strings.TrimSpace(identity.UserID))
+	return err != nil
+}
+
+func sanitizeVehiclesForUnapprovedDriver(vehicles []Vehicle) []Vehicle {
+	filtered := make([]Vehicle, 0, len(vehicles))
+	for _, vehicle := range vehicles {
+		if !vehicle.IsActive {
+			continue
+		}
+		if strings.TrimSpace(vehicle.DriverID) != "" {
+			continue
+		}
+		filtered = append(filtered, sanitizeVehicleForUnapprovedDriver(vehicle))
+	}
+	return filtered
+}
+
+func sanitizeVehicleForUnapprovedDriver(vehicle Vehicle) Vehicle {
+	return Vehicle{
+		ID:          vehicle.ID,
+		Nickname:    vehicle.DiscoveryLabel(),
+		Type:        vehicle.Type,
+		ServiceType: vehicle.ServiceType,
+		IsActive:    vehicle.IsActive,
+		Status:      vehicle.Status,
+		LastUpdated: vehicle.LastUpdated,
+		CreatedAt:   vehicle.CreatedAt,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

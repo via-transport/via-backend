@@ -138,6 +138,9 @@ func (s *Store) ListVehicles(ctx context.Context, fleetID string) ([]Vehicle, er
 }
 
 func (s *Store) ListVehiclesForDriver(ctx context.Context, fleetID, driverID string) ([]Vehicle, error) {
+	if strings.TrimSpace(driverID) == "" {
+		return []Vehicle{}, nil
+	}
 	all, err := s.ListVehicles(ctx, fleetID)
 	if err != nil {
 		return nil, err

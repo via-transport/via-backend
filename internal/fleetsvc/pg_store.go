@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,12 +25,54 @@ func NewPGStore(pool *pgxpool.Pool) *PGStore {
 
 // Compile-time interface check.
 var _ FleetStore = (*PGStore)(nil)
+var _ VehicleLimitEnforcer = (*PGStore)(nil)
 
 // -------------------------------------------------------------------------
 // Vehicles
 // -------------------------------------------------------------------------
 
 func (s *PGStore) PutVehicle(ctx context.Context, v *Vehicle) error {
+	return s.putVehicle(ctx, s.pool, v)
+}
+
+func (s *PGStore) CreateVehicleIfWithinLimit(ctx context.Context, v *Vehicle, vehicleLimit int) error {
+	if vehicleLimit <= 0 {
+		return s.putVehicle(ctx, s.pool, v)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var tenantID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM tenants WHERE id=$1 FOR UPDATE`, v.FleetID).Scan(&tenantID); err != nil {
+		return err
+	}
+
+	var currentCount int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM vehicles WHERE fleet_id=$1`, v.FleetID).Scan(&currentCount); err != nil {
+		return err
+	}
+	if currentCount >= vehicleLimit {
+		return ErrVehicleLimitReached
+	}
+
+	if err := s.putVehicle(ctx, tx, v); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+type vehicleExec interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+func (s *PGStore) putVehicle(ctx context.Context, exec vehicleExec, v *Vehicle) error {
 	var locTs interface{} = nil
 	if v.CurrentLocation != nil && !v.CurrentLocation.Timestamp.IsZero() {
 		locTs = v.CurrentLocation.Timestamp
@@ -42,20 +86,20 @@ func (s *PGStore) PutVehicle(ctx context.Context, v *Vehicle) error {
 		locAcc = v.CurrentLocation.Accuracy
 	}
 
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO vehicles (id, registration_number, type, service_type, is_active, status,
+	_, err := exec.Exec(ctx, `
+		INSERT INTO vehicles (id, registration_number, nickname, type, service_type, is_active, status,
 		  status_message, current_route_id, driver_id, driver_name, driver_phone, fleet_id,
 		  capacity, current_passengers, loc_latitude, loc_longitude, loc_heading, loc_speed,
 		  loc_accuracy, loc_timestamp, last_updated, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		ON CONFLICT (id) DO UPDATE SET
-		  registration_number=$2, type=$3, service_type=$4, is_active=$5, status=$6,
-		  status_message=$7, current_route_id=$8, driver_id=$9, driver_name=$10, driver_phone=$11,
-		  fleet_id=$12, capacity=$13, current_passengers=$14,
-		  loc_latitude=$15, loc_longitude=$16, loc_heading=$17, loc_speed=$18,
-		  loc_accuracy=$19, loc_timestamp=$20, last_updated=$21
+		  registration_number=$2, nickname=$3, type=$4, service_type=$5, is_active=$6, status=$7,
+		  status_message=$8, current_route_id=$9, driver_id=$10, driver_name=$11, driver_phone=$12,
+		  fleet_id=$13, capacity=$14, current_passengers=$15,
+		  loc_latitude=$16, loc_longitude=$17, loc_heading=$18, loc_speed=$19,
+		  loc_accuracy=$20, loc_timestamp=$21, last_updated=$22
 	`,
-		v.ID, v.RegistrationNumber, v.Type, v.ServiceType, v.IsActive, v.Status,
+		v.ID, v.RegistrationNumber, v.Nickname, v.Type, v.ServiceType, v.IsActive, v.Status,
 		v.StatusMessage, v.CurrentRouteID, v.DriverID, v.DriverName, v.DriverPhone, v.FleetID,
 		v.Capacity, v.CurrentPassengers,
 		locLat, locLng, locHead, locSpd, locAcc, locTs,
@@ -95,11 +139,14 @@ func (s *PGStore) ListVehicles(ctx context.Context, fleetID string) ([]Vehicle, 
 }
 
 func (s *PGStore) ListVehiclesForDriver(ctx context.Context, fleetID, driverID string) ([]Vehicle, error) {
+	if strings.TrimSpace(driverID) == "" {
+		return []Vehicle{}, nil
+	}
 	query := vehicleSelectSQL + " WHERE fleet_id=$1 AND driver_id=$2 ORDER BY last_updated DESC"
 	return s.queryVehicles(ctx, query, fleetID, driverID)
 }
 
-const vehicleSelectSQL = `SELECT id, registration_number, type, service_type, is_active, status,
+const vehicleSelectSQL = `SELECT id, registration_number, nickname, type, service_type, is_active, status,
 	status_message, current_route_id, driver_id, driver_name, driver_phone, fleet_id,
 	capacity, current_passengers, loc_latitude, loc_longitude, loc_heading, loc_speed,
 	loc_accuracy, loc_timestamp, last_updated, created_at
@@ -110,7 +157,7 @@ func (s *PGStore) scanVehicle(row pgx.Row) (*Vehicle, error) {
 	var locLat, locLng, locHead, locSpd, locAcc float64
 	var locTs *time.Time
 	err := row.Scan(
-		&v.ID, &v.RegistrationNumber, &v.Type, &v.ServiceType, &v.IsActive, &v.Status,
+		&v.ID, &v.RegistrationNumber, &v.Nickname, &v.Type, &v.ServiceType, &v.IsActive, &v.Status,
 		&v.StatusMessage, &v.CurrentRouteID, &v.DriverID, &v.DriverName, &v.DriverPhone,
 		&v.FleetID, &v.Capacity, &v.CurrentPassengers,
 		&locLat, &locLng, &locHead, &locSpd, &locAcc, &locTs,
@@ -146,7 +193,7 @@ func (s *PGStore) queryVehicles(ctx context.Context, query string, args ...inter
 		var locLat, locLng, locHead, locSpd, locAcc float64
 		var locTs *time.Time
 		if err := rows.Scan(
-			&v.ID, &v.RegistrationNumber, &v.Type, &v.ServiceType, &v.IsActive, &v.Status,
+			&v.ID, &v.RegistrationNumber, &v.Nickname, &v.Type, &v.ServiceType, &v.IsActive, &v.Status,
 			&v.StatusMessage, &v.CurrentRouteID, &v.DriverID, &v.DriverName, &v.DriverPhone,
 			&v.FleetID, &v.Capacity, &v.CurrentPassengers,
 			&locLat, &locLng, &locHead, &locSpd, &locAcc, &locTs,

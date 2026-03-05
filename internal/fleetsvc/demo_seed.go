@@ -35,12 +35,11 @@ func EnsureDemoFleet(ctx context.Context, store FleetStore, fleetID string) erro
 
 	now := time.Now().UTC()
 
-	driver, err := ensureDemoDriver(ctx, store, fleetID, now)
-	if err != nil {
+	if _, err := ensureDemoDriver(ctx, store, fleetID, now); err != nil {
 		return err
 	}
 
-	if err := ensurePrimaryDemoVehicle(ctx, store, fleetID, now, driver); err != nil {
+	if err := ensurePrimaryDemoVehicle(ctx, store, fleetID, now); err != nil {
 		return err
 	}
 
@@ -65,7 +64,7 @@ func ensureDemoDriver(
 			FullName:           demoDriverName,
 			Phone:              demoDriverPhone,
 			FleetID:            fleetID,
-			AssignedVehicleIDs: []string{demoPrimaryVehicleID},
+			AssignedVehicleIDs: []string{},
 			IsActive:           true,
 			CreatedAt:          now,
 			UpdatedAt:          now,
@@ -93,9 +92,8 @@ func ensureDemoDriver(
 		driver.IsActive = true
 		changed = true
 	}
-	if len(driver.AssignedVehicleIDs) != 1 ||
-		driver.AssignedVehicleIDs[0] != demoPrimaryVehicleID {
-		driver.AssignedVehicleIDs = []string{demoPrimaryVehicleID}
+	if len(driver.AssignedVehicleIDs) != 0 {
+		driver.AssignedVehicleIDs = []string{}
 		changed = true
 	}
 
@@ -117,7 +115,6 @@ func ensurePrimaryDemoVehicle(
 	store FleetStore,
 	fleetID string,
 	now time.Time,
-	driver *Driver,
 ) error {
 	vehicle, err := store.GetVehicle(ctx, fleetID, demoPrimaryVehicleID)
 	if err != nil {
@@ -130,9 +127,9 @@ func ensurePrimaryDemoVehicle(
 			Status:             demoPrimaryVehicleStatus,
 			StatusMessage:      demoPrimaryVehicleStatusNote,
 			CurrentRouteID:     demoPrimaryRouteID,
-			DriverID:           driver.ID,
-			DriverName:         driver.FullName,
-			DriverPhone:        driver.Phone,
+			DriverID:           "",
+			DriverName:         "",
+			DriverPhone:        "",
 			FleetID:            fleetID,
 			Capacity:           45,
 			CurrentLocation: &VehicleLocation{
@@ -191,20 +188,11 @@ func ensurePrimaryDemoVehicle(
 		}
 		changed = true
 	}
-	if vehicle.DriverID != driver.ID {
-		vehicle.DriverID = driver.ID
-		vehicle.DriverName = driver.FullName
-		vehicle.DriverPhone = driver.Phone
+	if vehicle.DriverID != "" || vehicle.DriverName != "" || vehicle.DriverPhone != "" {
+		vehicle.DriverID = ""
+		vehicle.DriverName = ""
+		vehicle.DriverPhone = ""
 		changed = true
-	} else {
-		if vehicle.DriverName != driver.FullName {
-			vehicle.DriverName = driver.FullName
-			changed = true
-		}
-		if vehicle.DriverPhone != driver.Phone {
-			vehicle.DriverPhone = driver.Phone
-			changed = true
-		}
 	}
 
 	if changed {
