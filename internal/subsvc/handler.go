@@ -72,6 +72,8 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/subscriptions/{id}", h.Update)
 	mux.HandleFunc("DELETE /api/v1/subscriptions/{id}", h.Cancel)
 	mux.HandleFunc("GET /api/v1/subscriptions/vehicle/{vehicleId}", h.ListForVehicle)
+	mux.HandleFunc("GET /api/v1/subscriptions/fleet/{fleetId}", h.ListForFleet)
+	mux.HandleFunc("POST /api/v1/subscriptions/{id}/revoke", h.Revoke)
 	mux.HandleFunc("POST /api/v1/join-requests", h.CreateJoinRequest)
 	mux.HandleFunc("GET /api/v1/join-requests", h.ListJoinRequests)
 	mux.HandleFunc("POST /api/v1/join-requests/{id}/approve", h.ApproveJoinRequest)
@@ -382,6 +384,75 @@ func (h *Handler) ListForVehicle(w http.ResponseWriter, r *http.Request) {
 		subs = []Subscription{}
 	}
 	writeJSON(w, http.StatusOK, subs)
+}
+
+// ListForFleet returns all subscriptions for a fleet, optionally filtered by status.
+// Query params: ?status=active (defaults to "active" if omitted).
+func (h *Handler) ListForFleet(w http.ResponseWriter, r *http.Request) {
+	fleetID := r.PathValue("fleetId")
+	if fleetID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required"))
+		return
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status == "" {
+		status = "active"
+	}
+	subs, err := h.store.ListByFleetStatus(r.Context(), fleetID, status)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	if subs == nil {
+		subs = []Subscription{}
+	}
+
+	// Enrich with passenger info
+	type enrichedSub struct {
+		Subscription
+		PassengerName  string `json:"passenger_name,omitempty"`
+		PassengerEmail string `json:"passenger_email,omitempty"`
+	}
+	enriched := make([]enrichedSub, 0, len(subs))
+	for _, sub := range subs {
+		es := enrichedSub{Subscription: sub}
+		if h.userStore != nil && sub.UserID != "" {
+			if u, err := h.userStore.GetUser(r.Context(), sub.UserID); err == nil && u != nil {
+				es.PassengerName = strings.TrimSpace(u.DisplayName)
+				es.PassengerEmail = strings.TrimSpace(u.Email)
+			}
+		}
+		enriched = append(enriched, es)
+	}
+	writeJSON(w, http.StatusOK, enriched)
+}
+
+// Revoke allows an admin/owner to cancel an active subscription.
+// Does not require the subscriber's user_id — looks up by subscription ID only.
+func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
+	subID := r.PathValue("id")
+	if subID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("subscription id required"))
+		return
+	}
+	existing, err := h.store.GetByID(r.Context(), subID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errBody("subscription not found"))
+		return
+	}
+	if existing.Status == "cancelled" || existing.Status == "revoked" {
+		writeJSON(w, http.StatusOK, existing)
+		return
+	}
+	existing.Status = "revoked"
+	existing.UpdatedAt = time.Now().UTC()
+	if err := h.store.Put(r.Context(), existing); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("revoke failed"))
+		return
+	}
+	log.Printf("[subsvc] subscription %s revoked by admin (fleet=%s, vehicle=%s, user=%s)",
+		subID, existing.FleetID, existing.VehicleID, existing.UserID)
+	writeJSON(w, http.StatusOK, existing)
 }
 
 func (h *Handler) subscribe(subject string, process func([]byte)) error {
