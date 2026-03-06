@@ -46,6 +46,7 @@ func New(
 	authHandler *authsvc.Handler,
 	tenantHandler *tenantsvc.Handler,
 	tenantPolicy *tenantsvc.Policy,
+	fleetStore fleetsvc.FleetStore,
 	fleetHandler *fleetsvc.Handler,
 	notifyHandler *notifysvc.Handler,
 	opsHandler *opsvc.Handler,
@@ -59,9 +60,9 @@ func New(
 	mux.HandleFunc("/debug/cache/stats", appcache.StatsHandler(appCache))
 
 	// --- Legacy API routes (GPS, trip, events, websocket) ---
-	mux.HandleFunc("/v1/gps/update", handler.GPSIngest(gpsSvc, tenantPolicy))
-	mux.HandleFunc("/v1/trip/start", handler.TripStart(eventSvc, tenantPolicy))
-	mux.HandleFunc("/v1/events/publish", handler.EventPublish(eventSvc, tenantPolicy))
+	mux.HandleFunc("/v1/gps/update", handler.GPSIngest(gpsSvc, tenantPolicy, fleetStore))
+	mux.HandleFunc("/v1/trip/start", handler.TripStart(eventSvc, tenantPolicy, fleetStore))
+	mux.HandleFunc("/v1/events/publish", handler.EventPublish(eventSvc, tenantPolicy, fleetStore))
 	mux.HandleFunc("/ws", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy, opsHandlerStore(opsHandler)))
 	mux.HandleFunc("GET /api/v1/vehicles/{id}/stream", handler.WSFanout(broker, gpsCache, cfg, tenantPolicy, opsHandlerStore(opsHandler)))
 

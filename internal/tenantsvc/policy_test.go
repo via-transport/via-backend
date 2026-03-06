@@ -74,3 +74,47 @@ func TestGPSRateLimit(t *testing.T) {
 		t.Fatalf("expected location_rate_limited policy error, got: %v", err)
 	}
 }
+
+func TestCheckVehicleCreateAllowsOperationalTrialCapacity(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	tenant := DefaultTrialTenant("tenant-c", "Tenant C", time.Now().UTC())
+	if err := store.Put(ctx, tenant); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+
+	policy := NewPolicy(store)
+
+	if _, err := policy.CheckVehicleCreate(ctx, tenant.ID, 2); err != nil {
+		t.Fatalf("expected trial tenant with two vehicles to remain within operational capacity: %v", err)
+	}
+}
+
+func TestPlanSummaryNormalizesLegacyTrialLimits(t *testing.T) {
+	now := time.Now().UTC()
+	tenant := &Tenant{
+		ID:                 "tenant-d",
+		Name:               "Tenant D",
+		PlanType:           PlanTrial,
+		SubscriptionStatus: StatusTrial,
+		VehicleLimit:       2,
+		PassengerLimit:     100,
+		DriverLimit:        2,
+		EventHourlyLimit:   30,
+	}
+
+	view := tenant.PlanSummary(now)
+
+	if view.VehicleLimit != minOperationalVehicleLimit {
+		t.Fatalf("expected vehicle limit %d, got %d", minOperationalVehicleLimit, view.VehicleLimit)
+	}
+	if view.PassengerLimit != minOperationalPassengerLimit {
+		t.Fatalf("expected passenger limit %d, got %d", minOperationalPassengerLimit, view.PassengerLimit)
+	}
+	if view.DriverLimit != minOperationalDriverLimit {
+		t.Fatalf("expected driver limit %d, got %d", minOperationalDriverLimit, view.DriverLimit)
+	}
+	if view.EventHourlyLimit != minOperationalEventHourlyLimit {
+		t.Fatalf("expected event limit %d, got %d", minOperationalEventHourlyLimit, view.EventHourlyLimit)
+	}
+}

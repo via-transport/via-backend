@@ -1,0 +1,2 @@
+ALTER TABLE driver_requests
+ADD COLUMN IF NOT EXISTS vehicle_id TEXT DEFAULT '';

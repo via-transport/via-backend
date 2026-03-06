@@ -68,11 +68,29 @@ func (b *Broker) ProvisionStreams(cfg config.Config) (jetstream.KeyValue, error)
 		return nil, fmt.Errorf("provision stream %s: %w", cfg.GPSRawStreamName, err)
 	}
 
+	// EVENT_WINDOW keeps a bounded replay buffer for trip, ops, and legacy
+	// fleet events without growing unbounded.
+	_, err = b.JS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:        cfg.EventReplayStreamName,
+		Description: "Realtime fleet events retained in a moving replay window",
+		Subjects: []string{
+			"fleet.*.events.>",
+			"fleet.*.vehicle.*.trip.*",
+			"fleet.*.vehicle.*.ops.>",
+		},
+		MaxAge:  cfg.EventReplayMaxAge,
+		Storage: jetstream.FileStorage,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("provision stream %s: %w", cfg.EventReplayStreamName, err)
+	}
+
 	// GPS_SNAPSHOT KV – latest point per vehicle for restart-safe bootstrap.
 	kv, err := b.JS.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:      cfg.GPSSnapshotBucket,
 		Description: "Latest GPS position per vehicle",
 		History:     uint8(cfg.GPSSnapshotHistory),
+		TTL:         cfg.SnapshotMaxAge,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision KV %s: %w", cfg.GPSSnapshotBucket, err)
@@ -83,12 +101,27 @@ func (b *Broker) ProvisionStreams(cfg config.Config) (jetstream.KeyValue, error)
 
 // ProvisionKV creates or updates a single KV bucket. Returns the KV handle.
 func (b *Broker) ProvisionKV(name, description string) (jetstream.KeyValue, error) {
+	return b.ProvisionKVWithConfig(name, description, 1, 0)
+}
+
+// ProvisionKVWithConfig creates or updates a single KV bucket. Returns the KV handle.
+func (b *Broker) ProvisionKVWithConfig(
+	name string,
+	description string,
+	history int,
+	ttl time.Duration,
+) (jetstream.KeyValue, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	normalizedHistory := uint8(1)
+	if history > 0 {
+		normalizedHistory = uint8(history)
+	}
 	kv, err := b.JS.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:      name,
 		Description: description,
-		History:     1,
+		History:     normalizedHistory,
+		TTL:         ttl,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision KV %s: %w", name, err)

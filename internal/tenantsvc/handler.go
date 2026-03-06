@@ -3,6 +3,7 @@ package tenantsvc
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ func NewHandler(store Store, policy *Policy) *Handler {
 
 func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/tenants", h.CreateTenant)
+	mux.HandleFunc("GET /api/v1/public/tenants", h.ListPublicTenants)
 	mux.HandleFunc("GET /api/v1/tenants/{id}", h.GetTenant)
 	mux.HandleFunc("GET /api/v1/billing/plan", h.GetPlan)
 	mux.HandleFunc("POST /api/v1/billing/start-trial", h.StartTrial)
@@ -59,6 +61,49 @@ func (h *Handler) GetTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tenant)
+}
+
+func (h *Handler) ListPublicTenants(w http.ResponseWriter, r *http.Request) {
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if len(query) < 2 {
+		writeJSON(w, http.StatusOK, []map[string]string{})
+		return
+	}
+
+	tenants, err := h.store.List(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("tenant lookup failed"))
+		return
+	}
+
+	matches := make([]Tenant, 0, len(tenants))
+	for _, tenant := range tenants {
+		if !matchesTenantQuery(tenant, query) {
+			continue
+		}
+		matches = append(matches, tenant)
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		left := strings.ToLower(strings.TrimSpace(matches[i].Name))
+		right := strings.ToLower(strings.TrimSpace(matches[j].Name))
+		if left == right {
+			return matches[i].ID < matches[j].ID
+		}
+		return left < right
+	})
+	if len(matches) > 10 {
+		matches = matches[:10]
+	}
+
+	results := make([]map[string]string, 0, len(matches))
+	for _, tenant := range matches {
+		results = append(results, map[string]string{
+			"id":   tenant.ID,
+			"name": tenant.Name,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, results)
 }
 
 func (h *Handler) GetPlan(w http.ResponseWriter, r *http.Request) {
@@ -150,4 +195,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func errBody(msg string) map[string]string {
 	return map[string]string{"error": msg}
+}
+
+func matchesTenantQuery(tenant Tenant, query string) bool {
+	if query == "" {
+		return false
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		tenant.ID,
+		tenant.Name,
+	}, " "))
+	return strings.Contains(haystack, query)
 }

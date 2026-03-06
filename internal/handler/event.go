@@ -4,13 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"via-backend/internal/auth"
+	"via-backend/internal/fleetsvc"
 	"via-backend/internal/model"
 	"via-backend/internal/service"
 	"via-backend/internal/tenantsvc"
 )
 
 // TripStart handles POST /v1/trip/start.
-func TripStart(svc *service.EventService, policy *tenantsvc.Policy) http.HandlerFunc {
+func TripStart(
+	svc *service.EventService,
+	policy *tenantsvc.Policy,
+	assignments fleetsvc.FleetStore,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -20,6 +26,18 @@ func TripStart(svc *service.EventService, policy *tenantsvc.Policy) http.Handler
 		var p model.RealtimeEvent
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+		if identity := auth.IdentityFromContext(r.Context()); identity.Role == auth.RoleDriver {
+			p.DriverID = identity.UserID
+		}
+		if err := authorizeDriverRealtimePublish(
+			r.Context(),
+			assignments,
+			p.FleetID,
+			p.VehicleID,
+		); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		if policy != nil {
@@ -46,7 +64,11 @@ func TripStart(svc *service.EventService, policy *tenantsvc.Policy) http.Handler
 }
 
 // EventPublish handles POST /v1/events/publish.
-func EventPublish(svc *service.EventService, policy *tenantsvc.Policy) http.HandlerFunc {
+func EventPublish(
+	svc *service.EventService,
+	policy *tenantsvc.Policy,
+	assignments fleetsvc.FleetStore,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -56,6 +78,18 @@ func EventPublish(svc *service.EventService, policy *tenantsvc.Policy) http.Hand
 		var p model.RealtimeEvent
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+		if identity := auth.IdentityFromContext(r.Context()); identity.Role == auth.RoleDriver {
+			p.DriverID = identity.UserID
+		}
+		if err := authorizeDriverRealtimePublish(
+			r.Context(),
+			assignments,
+			p.FleetID,
+			p.VehicleID,
+		); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		if policy != nil {

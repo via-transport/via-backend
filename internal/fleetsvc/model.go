@@ -2,7 +2,10 @@
 // It replaces Firestore collections with NATS KV storage + pub/sub fanout.
 package fleetsvc
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ---------------------------------------------------------------------------
 // Vehicle
@@ -11,6 +14,7 @@ import "time"
 type Vehicle struct {
 	ID                 string           `json:"id"`
 	RegistrationNumber string           `json:"registration_number"`
+	Nickname           string           `json:"nickname,omitempty"`
 	Type               string           `json:"type"`
 	ServiceType        string           `json:"service_type"`
 	IsActive           bool             `json:"is_active"`
@@ -26,6 +30,22 @@ type Vehicle struct {
 	CurrentPassengers  int              `json:"current_passengers,omitempty"`
 	LastUpdated        time.Time        `json:"last_updated"`
 	CreatedAt          time.Time        `json:"created_at"`
+}
+
+func (v Vehicle) DiscoveryLabel() string {
+	nickname := strings.TrimSpace(v.Nickname)
+	if nickname != "" {
+		return nickname
+	}
+
+	suffix := strings.ToUpper(strings.TrimSpace(v.ID))
+	if len(suffix) > 4 {
+		suffix = suffix[len(suffix)-4:]
+	}
+	if suffix == "" {
+		return "Vehicle"
+	}
+	return "Vehicle " + suffix
 }
 
 type VehicleLocation struct {

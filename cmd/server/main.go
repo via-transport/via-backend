@@ -167,6 +167,21 @@ func main() {
 		log.Fatalf("failed to create JetStream stream GPS_RAW: %v", err)
 	}
 
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:        "EVENT_WINDOW",
+		Description: "Realtime fleet events retained in a moving replay window",
+		Subjects: []string{
+			"fleet.*.events.>",
+			"fleet.*.vehicle.*.trip.*",
+			"fleet.*.vehicle.*.ops.>",
+		},
+		MaxAge:  6 * time.Hour,
+		Storage: jetstream.FileStorage,
+	})
+	if err != nil {
+		log.Fatalf("failed to create JetStream stream EVENT_WINDOW: %v", err)
+	}
+
 	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:      "GPS_SNAPSHOT",
 		Description: "Latest GPS positions per vehicle",

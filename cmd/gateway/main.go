@@ -75,6 +75,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("[main] %v", err)
 	}
+	eventSnapshotKV, err := broker.ProvisionKVWithConfig(
+		cfg.EventSnapshotBucket,
+		"Last published realtime event per fleet/vehicle",
+		1,
+		cfg.SnapshotMaxAge,
+	)
+	if err != nil {
+		log.Fatalf("[main] %v", err)
+	}
 
 	// 4b. Build service stores (NATS KV or PostgreSQL).
 	// NOTE: caches are created before stores since NATS branch needs appCache.
@@ -191,7 +200,7 @@ func main() {
 
 	// 6. Services
 	gpsSvc := service.NewGPSService(broker, gpsCache, kv, cfg)
-	eventSvc := service.NewEventService(broker)
+	eventSvc := service.NewEventService(broker, eventSnapshotKV)
 
 	// Seed GPS cache from KV (restart-safe recovery)
 	seedCtx, seedCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -211,10 +220,18 @@ func main() {
 	authHandler.SetUserIDFunc(func(r *http.Request) string {
 		return auth.IdentityFromContext(r.Context()).UserID
 	})
+	authHandler.SetOwnerProvisioner(authsvc.NewOwnerAccountRegistrar(authStore, tenantStore))
 
 	tenantHandler := tenantsvc.NewHandler(tenantStore, tenantPolicy)
 
-	fleetHandler := fleetsvc.NewHandler(fleetStore, broker, tenantPolicy, operationStore)
+	fleetHandler := fleetsvc.NewHandler(
+		fleetStore,
+		broker,
+		tenantPolicy,
+		operationStore,
+		notifyStore,
+		authStore,
+	)
 	if err := fleetHandler.SubscribeCommands(); err != nil {
 		log.Fatalf("[main] subscribe fleet commands: %v", err)
 	}
@@ -224,8 +241,21 @@ func main() {
 	notifyHandler.SubscribeFleetEvents(broker, subStore) // event → notification pipeline
 
 	opsHandler := opsvc.NewHandler(operationStore)
-	subHandler := subsvc.NewHandler(subStore, tenantPolicy, broker, operationStore)
-	requestHandler := requestsvc.NewHandler(driverRequestStore, fleetStore, broker, operationStore)
+	subHandler := subsvc.NewHandler(
+		subStore,
+		tenantPolicy,
+		broker,
+		operationStore,
+		authStore,
+	)
+	requestHandler := requestsvc.NewHandler(
+		driverRequestStore,
+		fleetStore,
+		broker,
+		operationStore,
+		notifyStore,
+		authStore,
+	)
 	if err := subHandler.SubscribeCommands(); err != nil {
 		log.Fatalf("[main] subscribe join requests: %v", err)
 	}
@@ -238,12 +268,21 @@ func main() {
 		Enabled:   cfg.AuthEnabled,
 		JWTSecret: cfg.JWTSecret,
 		APIKeys:   parseAPIKeys(cfg.AuthAPIKeys),
-		SkipPaths: []string{"/healthz", "/debug/", "/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/refresh", "/api/v1/auth/forgot-password"},
+		SkipPaths: []string{
+			"/healthz",
+			"/debug/",
+			"/api/v1/auth/login",
+			"/api/v1/auth/register",
+			"/api/v1/auth/refresh",
+			"/api/v1/auth/forgot-password",
+			"/api/v1/auth/users",
+			"/api/v1/public/tenants",
+		},
 	}
 
 	// 8. HTTP server
 	srv := server.New(cfg, gpsSvc, eventSvc, broker, gpsCache, appCache, authCfg,
-		authHandler, tenantHandler, tenantPolicy, fleetHandler, notifyHandler, opsHandler, requestHandler, subHandler)
+		authHandler, tenantHandler, tenantPolicy, fleetStore, fleetHandler, notifyHandler, opsHandler, requestHandler, subHandler)
 
 	go func() {
 		if err := srv.Start(); err != nil {

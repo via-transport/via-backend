@@ -15,6 +15,12 @@ const (
 	StatusActive    = "ACTIVE"
 	StatusGrace     = "GRACE"
 	StatusSuspended = "SUSPENDED"
+
+	minOperationalVehicleLimit     = 10
+	minOperationalPassengerLimit   = 250
+	minOperationalDriverLimit      = 10
+	minLocationPublishIntervalS    = 3
+	minOperationalEventHourlyLimit = 60
 )
 
 // Tenant is the billing and authorization boundary. In the current codebase
@@ -83,11 +89,11 @@ func DefaultTrialTenant(tenantID, name string, now time.Time) *Tenant {
 		TrialStartedAt:           now,
 		TrialEndsAt:              now.Add(14 * 24 * time.Hour),
 		GraceEndsAt:              now.Add((14 + 7) * 24 * time.Hour),
-		VehicleLimit:             2,
-		PassengerLimit:           100,
-		DriverLimit:              2,
-		LocationPublishIntervalS: 3,
-		EventHourlyLimit:         30,
+		VehicleLimit:             minOperationalVehicleLimit,
+		PassengerLimit:           minOperationalPassengerLimit,
+		DriverLimit:              minOperationalDriverLimit,
+		LocationPublishIntervalS: minLocationPublishIntervalS,
+		EventHourlyLimit:         minOperationalEventHourlyLimit,
 		CreatedAt:                now,
 		UpdatedAt:                now,
 	}
@@ -128,11 +134,11 @@ func (t *Tenant) PlanSummary(now time.Time) PlanView {
 		SubscriptionStatus:       upperOrDefault(t.SubscriptionStatus, StatusTrial),
 		EffectiveStatus:          effective,
 		RealtimeEnabled:          effective != StatusSuspended,
-		VehicleLimit:             max(t.VehicleLimit, 2),
-		PassengerLimit:           max(t.PassengerLimit, 100),
-		DriverLimit:              max(t.DriverLimit, 2),
-		LocationPublishIntervalS: max(t.LocationPublishIntervalS, 3),
-		EventHourlyLimit:         max(t.EventHourlyLimit, 30),
+		VehicleLimit:             max(t.VehicleLimit, minOperationalVehicleLimit),
+		PassengerLimit:           max(t.PassengerLimit, minOperationalPassengerLimit),
+		DriverLimit:              max(t.DriverLimit, minOperationalDriverLimit),
+		LocationPublishIntervalS: max(t.LocationPublishIntervalS, minLocationPublishIntervalS),
+		EventHourlyLimit:         max(t.EventHourlyLimit, minOperationalEventHourlyLimit),
 		TrialStartedAt:           t.TrialStartedAt,
 		TrialEndsAt:              t.TrialEndsAt,
 		GraceEndsAt:              t.GraceEndsAt,
@@ -162,7 +168,7 @@ func upperOrDefault(value, fallback string) string {
 }
 
 func max(value, fallback int) int {
-	if value <= 0 {
+	if value < fallback {
 		return fallback
 	}
 	return value

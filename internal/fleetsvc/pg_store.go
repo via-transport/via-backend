@@ -224,15 +224,20 @@ func (s *PGStore) PutDriver(ctx context.Context, d *Driver) error {
 	if vehicleIDs == nil {
 		vehicleIDs = []string{}
 	}
+	primaryVehicleID := ""
+	if len(vehicleIDs) > 0 {
+		primaryVehicleID = strings.TrimSpace(vehicleIDs[0])
+	}
+	userID := strings.TrimSpace(d.ID)
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO drivers (id, email, full_name, phone, fleet_id,
+		INSERT INTO drivers (id, user_id, email, full_name, phone, fleet_id, vehicle_id,
 		  assigned_vehicle_ids, is_active, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (id) DO UPDATE SET
-		  email=$2, full_name=$3, phone=$4, fleet_id=$5,
-		  assigned_vehicle_ids=$6, is_active=$7, updated_at=$9
+		  user_id=$2, email=$3, full_name=$4, phone=$5, fleet_id=$6,
+		  vehicle_id=$7, assigned_vehicle_ids=$8, is_active=$9, updated_at=$11
 	`,
-		d.ID, d.Email, d.FullName, d.Phone, d.FleetID,
+		d.ID, userID, d.Email, d.FullName, d.Phone, d.FleetID, primaryVehicleID,
 		vehicleIDs, d.IsActive, d.CreatedAt, d.UpdatedAt,
 	)
 	return err

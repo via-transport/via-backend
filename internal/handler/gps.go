@@ -4,13 +4,18 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"via-backend/internal/fleetsvc"
 	"via-backend/internal/model"
 	"via-backend/internal/service"
 	"via-backend/internal/tenantsvc"
 )
 
 // GPSIngest handles POST /v1/gps/update.
-func GPSIngest(svc *service.GPSService, policy *tenantsvc.Policy) http.HandlerFunc {
+func GPSIngest(
+	svc *service.GPSService,
+	policy *tenantsvc.Policy,
+	assignments fleetsvc.FleetStore,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -20,6 +25,15 @@ func GPSIngest(svc *service.GPSService, policy *tenantsvc.Policy) http.HandlerFu
 		var p model.GPSUpdate
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+		if err := authorizeDriverRealtimePublish(
+			r.Context(),
+			assignments,
+			p.FleetID,
+			p.VehicleID,
+		); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		if policy != nil {

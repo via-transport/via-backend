@@ -5,6 +5,7 @@ package integration
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,71 @@ func TestFleet_Vehicle_Create(t *testing.T) {
 	assertField(t, data, "type", "van")
 	assertField(t, data, "capacity", 12)
 	assertField(t, data, "status", "active")
+}
+
+func TestFleet_Vehicle_CreateWithNickname_QueuesAndPersists(t *testing.T) {
+	c := newClient()
+	registrationNumber := fmt.Sprintf("NICK-%d", uniqueSuffix())
+	nickname := fmt.Sprintf("Morning Shuttle %d", uniqueSuffix())
+
+	status, accepted, err := c.post("/api/v1/vehicles", map[string]interface{}{
+		"fleet_id":            fleetID(),
+		"registration_number": registrationNumber,
+		"nickname":            nickname,
+		"type":                "van",
+		"capacity":            12,
+		"make":                "Toyota",
+		"model":               "HiAce",
+		"year":                2024,
+		"color":               "white",
+		"status":              "active",
+	})
+	if err != nil {
+		t.Fatalf("queue vehicle create failed: %v", err)
+	}
+	assertStatus(t, status, 202)
+	assertFieldNotEmpty(t, accepted, "operation_id")
+	assertField(t, accepted, "status", "queued")
+
+	op, err := c.waitForOperation(accepted["operation_id"].(string), 12*time.Second)
+	if err != nil {
+		t.Fatalf("vehicle create operation failed: %v (op=%v)", err, op)
+	}
+	assertField(t, op, "status", "succeeded")
+	assertFieldNotEmpty(t, op, "resource_id")
+
+	vehicleID := op["resource_id"].(string)
+	status, vehicle, err := c.get(
+		fmt.Sprintf("/api/v1/vehicles/%s?fleet_id=%s", vehicleID, fleetID()),
+	)
+	if err != nil {
+		t.Fatalf("get created vehicle failed: %v", err)
+	}
+	assertStatus(t, status, 200)
+	assertField(t, vehicle, "id", vehicleID)
+	assertField(t, vehicle, "fleet_id", fleetID())
+	assertField(t, vehicle, "registration_number", registrationNumber)
+	assertField(t, vehicle, "nickname", nickname)
+
+	status, items, err := c.getList(fmt.Sprintf("/api/v1/vehicles?fleet_id=%s", fleetID()))
+	if err != nil {
+		t.Fatalf("list vehicles failed: %v", err)
+	}
+	assertStatus(t, status, 200)
+
+	found := false
+	for _, item := range items {
+		if fmt.Sprintf("%v", item["id"]) != vehicleID {
+			continue
+		}
+		assertField(t, item, "nickname", nickname)
+		assertField(t, item, "registration_number", registrationNumber)
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("created vehicle %s not found in list", vehicleID)
+	}
 }
 
 func TestFleet_Vehicle_Create_MissingFleetID(t *testing.T) {
@@ -390,4 +456,3 @@ func TestFleet_Notice_CreateAndList(t *testing.T) {
 		t.Fatalf("expected at least 1 notice")
 	}
 }
-

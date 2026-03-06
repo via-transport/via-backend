@@ -285,6 +285,14 @@ func (h *Handler) ListVehicles(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(strings.TrimSpace(queryValues.Get("query")))
 	limit, offset := parsePagination(r)
 	identity := auth.IdentityFromContext(r.Context())
+	log.Printf(
+		"[fleet] list vehicles role=%s user=%s fleet=%s has_driver_filter=%t driver_id=%s",
+		identity.Role,
+		strings.TrimSpace(identity.UserID),
+		fleetID,
+		hasDriverFilter,
+		driverID,
+	)
 	if identity.Role == auth.RoleDriver && fleetID == "" {
 		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required for driver vehicle lookup"))
 		return
@@ -308,6 +316,7 @@ func (h *Handler) ListVehicles(w http.ResponseWriter, r *http.Request) {
 	if vehicles == nil {
 		vehicles = []Vehicle{}
 	}
+	log.Printf("[fleet] list vehicles raw_count=%d", len(vehicles))
 	if routeID != "" {
 		filtered := make([]Vehicle, 0, len(vehicles))
 		for _, vehicle := range vehicles {
@@ -331,6 +340,7 @@ func (h *Handler) ListVehicles(w http.ResponseWriter, r *http.Request) {
 	})
 	if h.shouldRedactVehicleDetails(r.Context(), identity, fleetID) {
 		vehicles = sanitizeVehiclesForUnapprovedDriver(vehicles)
+		log.Printf("[fleet] list vehicles redacted_count=%d", len(vehicles))
 	}
 	vehicles = paginate(vehicles, limit, offset)
 	writeJSON(w, http.StatusOK, vehicles)
@@ -2297,10 +2307,20 @@ func (h *Handler) shouldRedactVehicleDetails(
 		return false
 	}
 	if strings.TrimSpace(fleetID) == "" {
+		log.Printf("[fleet] redact driver %s: fleet missing", strings.TrimSpace(identity.UserID))
 		return true
 	}
 	_, err := h.store.GetDriver(ctx, fleetID, strings.TrimSpace(identity.UserID))
-	return err != nil
+	if err != nil {
+		log.Printf(
+			"[fleet] redact driver %s in fleet %s: driver record lookup failed: %v",
+			strings.TrimSpace(identity.UserID),
+			fleetID,
+			err,
+		)
+		return true
+	}
+	return false
 }
 
 func sanitizeVehiclesForUnapprovedDriver(vehicles []Vehicle) []Vehicle {

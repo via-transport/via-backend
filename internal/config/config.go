@@ -26,9 +26,15 @@ type Config struct {
 	GPSRawStreamName string
 	GPSRawMaxAge     time.Duration
 
+	// JetStream – bounded replay window for realtime events
+	EventReplayStreamName string
+	EventReplayMaxAge     time.Duration
+
 	// JetStream – GPS_SNAPSHOT KV
-	GPSSnapshotBucket  string
-	GPSSnapshotHistory int
+	GPSSnapshotBucket   string
+	GPSSnapshotHistory  int
+	EventSnapshotBucket string
+	SnapshotMaxAge      time.Duration
 
 	// GPS filtering (raw → live)
 	GPSLiveMinDistance float64       // metres
@@ -98,10 +104,14 @@ func Load() Config {
 		NATSReconnectWait: envDur("NATS_RECONNECT_WAIT", 2*time.Second),
 
 		// JetStream
-		GPSRawStreamName:   envStr("GPS_RAW_STREAM", "GPS_RAW"),
-		GPSRawMaxAge:       envDur("GPS_RAW_MAX_AGE", 24*time.Hour),
-		GPSSnapshotBucket:  envStr("GPS_SNAPSHOT_BUCKET", "GPS_SNAPSHOT"),
-		GPSSnapshotHistory: envInt("GPS_SNAPSHOT_HISTORY", 1),
+		GPSRawStreamName:      envStr("GPS_RAW_STREAM", "GPS_RAW"),
+		GPSRawMaxAge:          envDur("GPS_RAW_MAX_AGE", 24*time.Hour),
+		EventReplayStreamName: envStr("EVENT_REPLAY_STREAM", "EVENT_WINDOW"),
+		EventReplayMaxAge:     envDur("EVENT_REPLAY_MAX_AGE", 24*time.Hour),
+		GPSSnapshotBucket:     envStr("GPS_SNAPSHOT_BUCKET", "GPS_SNAPSHOT"),
+		GPSSnapshotHistory:    envInt("GPS_SNAPSHOT_HISTORY", 1),
+		EventSnapshotBucket:   envStr("EVENT_SNAPSHOT_BUCKET", "EVENT_SNAPSHOT"),
+		SnapshotMaxAge:        envDur("REALTIME_SNAPSHOT_MAX_AGE", 30*24*time.Hour),
 
 		// GPS filtering
 		GPSLiveMinDistance: envFloat("GPS_LIVE_MIN_DISTANCE_M", 10.0),

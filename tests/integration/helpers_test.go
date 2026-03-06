@@ -202,6 +202,46 @@ func (c *apiClient) getList(path string) (int, []map[string]interface{}, error) 
 	return c.doList("GET", path, nil)
 }
 
+func (c *apiClient) waitForOperation(
+	operationID string,
+	timeout time.Duration,
+) (map[string]interface{}, error) {
+	deadline := time.Now().Add(timeout)
+	var last map[string]interface{}
+
+	for time.Now().Before(deadline) {
+		status, data, err := c.get(fmt.Sprintf("/api/v1/operations/%s", operationID))
+		if err != nil {
+			return nil, fmt.Errorf("get operation %s: %w", operationID, err)
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("expected operation status 200, got %d", status)
+		}
+		last = data
+
+		switch strings.TrimSpace(fmt.Sprintf("%v", data["status"])) {
+		case "succeeded":
+			return data, nil
+		case "failed":
+			return data, fmt.Errorf(
+				"operation failed: %v",
+				data["error_message"],
+			)
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if last != nil {
+		return last, fmt.Errorf(
+			"operation %s did not complete before timeout; last status=%v",
+			operationID,
+			last["status"],
+		)
+	}
+	return nil, fmt.Errorf("operation %s not found before timeout", operationID)
+}
+
 // ---------------------------------------------------------------------------
 // Assertion helpers
 // ---------------------------------------------------------------------------

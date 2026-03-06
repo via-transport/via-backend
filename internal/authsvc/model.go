@@ -13,6 +13,9 @@ type User struct {
 	DisplayName  string    `json:"display_name"`
 	Phone        string    `json:"phone,omitempty"`
 	PhotoURL     string    `json:"photo_url,omitempty"`
+	Workplace    string    `json:"workplace,omitempty"`
+	Address      string    `json:"address,omitempty"`
+	EmployeeNo   string    `json:"employee_number,omitempty"`
 	Role         string    `json:"role"`     // owner | admin | driver | passenger
 	FleetID      string    `json:"fleet_id"` // tenant scope
 	VehicleID    string    `json:"vehicle_id,omitempty"`
@@ -29,6 +32,9 @@ type UserPublic struct {
 	DisplayName string    `json:"display_name"`
 	Phone       string    `json:"phone,omitempty"`
 	PhotoURL    string    `json:"photo_url,omitempty"`
+	Workplace   string    `json:"workplace,omitempty"`
+	Address     string    `json:"address,omitempty"`
+	EmployeeNo  string    `json:"employee_number,omitempty"`
 	Role        string    `json:"role"`
 	FleetID     string    `json:"fleet_id"`
 	VehicleID   string    `json:"vehicle_id,omitempty"`
@@ -44,6 +50,9 @@ func (u *User) ToPublic() UserPublic {
 		DisplayName: u.DisplayName,
 		Phone:       u.Phone,
 		PhotoURL:    u.PhotoURL,
+		Workplace:   u.Workplace,
+		Address:     u.Address,
+		EmployeeNo:  u.EmployeeNo,
 		Role:        u.Role,
 		FleetID:     u.FleetID,
 		VehicleID:   u.VehicleID,
@@ -73,8 +82,12 @@ type RegisterRequest struct {
 	Email       string `json:"email"`
 	Password    string `json:"password"`
 	DisplayName string `json:"display_name"`
-	Role        string `json:"role,omitempty"`  // defaults to "passenger"
+	Role        string `json:"role,omitempty"` // defaults to "passenger"
 	FleetID     string `json:"fleet_id,omitempty"`
+}
+
+type SetupOwnerFleetRequest struct {
+	FleetName string `json:"fleet_name"`
 }
 
 type RefreshRequest struct {
@@ -85,6 +98,9 @@ type UpdateProfileRequest struct {
 	DisplayName string `json:"display_name,omitempty"`
 	Phone       string `json:"phone,omitempty"`
 	PhotoURL    string `json:"photo_url,omitempty"`
+	Workplace   string `json:"workplace,omitempty"`
+	Address     string `json:"address,omitempty"`
+	EmployeeNo  string `json:"employee_number,omitempty"`
 }
 
 type ChangePasswordRequest struct {

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"via-backend/internal/auth"
+	"via-backend/internal/authsvc"
 	"via-backend/internal/messaging"
 	"via-backend/internal/opsvc"
 	"via-backend/internal/tenantsvc"
@@ -39,10 +40,11 @@ type joinRequestDecisionCommand struct {
 
 // Handler provides subscription REST endpoints.
 type Handler struct {
-	store    SubStore
-	policy   *tenantsvc.Policy
-	broker   *messaging.Broker
-	opsStore opsvc.Store
+	store     SubStore
+	policy    *tenantsvc.Policy
+	broker    *messaging.Broker
+	opsStore  opsvc.Store
+	userStore authsvc.UserStore
 }
 
 // NewHandler creates a subscription handler.
@@ -51,12 +53,14 @@ func NewHandler(
 	policy *tenantsvc.Policy,
 	broker *messaging.Broker,
 	opsStore opsvc.Store,
+	userStore authsvc.UserStore,
 ) *Handler {
 	return &Handler{
-		store:    store,
-		policy:   policy,
-		broker:   broker,
-		opsStore: opsStore,
+		store:     store,
+		policy:    policy,
+		broker:    broker,
+		opsStore:  opsStore,
+		userStore: userStore,
 	}
 }
 
@@ -192,6 +196,11 @@ func (h *Handler) CreateJoinRequest(w http.ResponseWriter, r *http.Request) {
 	if sub.FleetID == "" {
 		sub.FleetID = strings.TrimSpace(r.URL.Query().Get("fleet_id"))
 	}
+	sub.FleetID = strings.TrimSpace(sub.FleetID)
+	if sub.FleetID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required"))
+		return
+	}
 	if sub.Preferences == (SubPrefs{}) {
 		sub.Preferences = SubPrefs{
 			NotifyOnArrival: true,
@@ -236,7 +245,11 @@ func (h *Handler) ListJoinRequests(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []Subscription{}
 	}
-	writeJSON(w, http.StatusOK, items)
+	views := make([]JoinRequest, 0, len(items))
+	for i := range items {
+		views = append(views, h.buildJoinRequestView(r.Context(), &items[i]))
+	}
+	writeJSON(w, http.StatusOK, views)
 }
 
 func (h *Handler) ApproveJoinRequest(w http.ResponseWriter, r *http.Request) {
@@ -510,6 +523,44 @@ func (h *Handler) findExistingJoinRequest(
 		}
 	}
 	return nil, nil
+}
+
+func (h *Handler) buildJoinRequestView(ctx context.Context, item *Subscription) JoinRequest {
+	view := JoinRequest{
+		ID:          item.ID,
+		UserID:      item.UserID,
+		VehicleID:   item.VehicleID,
+		FleetID:     item.FleetID,
+		Status:      item.Status,
+		Preferences: item.Preferences,
+		CreatedAt:   item.CreatedAt,
+		UpdatedAt:   item.UpdatedAt,
+		ExpiresAt:   item.ExpiresAt,
+	}
+	if h.userStore == nil {
+		return view
+	}
+
+	userID := strings.TrimSpace(item.UserID)
+	if userID == "" {
+		return view
+	}
+	user, err := h.userStore.GetUser(ctx, userID)
+	if err != nil || user == nil {
+		return view
+	}
+
+	view.PassengerName = strings.TrimSpace(user.DisplayName)
+	view.PassengerEmail = strings.TrimSpace(user.Email)
+	view.PassengerPhone = strings.TrimSpace(user.Phone)
+	view.PassengerWorkplace = strings.TrimSpace(user.Workplace)
+	view.PassengerAddress = strings.TrimSpace(user.Address)
+	view.PassengerEmployeeNumber = strings.TrimSpace(user.EmployeeNo)
+	if !user.CreatedAt.IsZero() {
+		joinedAt := user.CreatedAt
+		view.PassengerJoinedAt = &joinedAt
+	}
+	return view
 }
 
 func (h *Handler) enqueueCommand(

@@ -1,8 +1,10 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -10,14 +12,25 @@ import (
 	"via-backend/internal/model"
 )
 
+type eventSnapshotStore interface {
+	Put(ctx context.Context, key string, value []byte) (uint64, error)
+}
+
 // EventService handles trip and operational event publishing.
 type EventService struct {
-	broker *messaging.Broker
+	broker   *messaging.Broker
+	snapshot eventSnapshotStore
 }
 
 // NewEventService creates an EventService.
-func NewEventService(broker *messaging.Broker) *EventService {
-	return &EventService{broker: broker}
+func NewEventService(
+	broker *messaging.Broker,
+	snapshot eventSnapshotStore,
+) *EventService {
+	return &EventService{
+		broker:   broker,
+		snapshot: snapshot,
+	}
 }
 
 // EventResult is the return value of Publish.
@@ -59,6 +72,7 @@ func (s *EventService) Publish(p model.RealtimeEvent) (EventResult, error) {
 	if err := s.broker.Publish(subject, body); err != nil {
 		return EventResult{}, fmt.Errorf("publish event: %w", err)
 	}
+	s.storeLastPublishedEvent(body, p)
 
 	return EventResult{Subject: subject}, nil
 }
@@ -71,4 +85,27 @@ func (s *EventService) PublishTripStart(p model.RealtimeEvent) (EventResult, err
 		p.Event = "trip_started"
 	}
 	return s.Publish(p)
+}
+
+func (s *EventService) storeLastPublishedEvent(body []byte, p model.RealtimeEvent) {
+	if s.snapshot == nil {
+		return
+	}
+
+	key := strings.TrimSpace(p.FleetID)
+	vehicleID := strings.TrimSpace(p.VehicleID)
+	if key == "" {
+		return
+	}
+	if vehicleID != "" {
+		key += "_" + vehicleID
+	} else {
+		key += "_fleet"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := s.snapshot.Put(ctx, key, body); err != nil {
+		log.Printf("[events] event snapshot warning: %v", err)
+	}
 }

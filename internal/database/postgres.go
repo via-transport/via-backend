@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,18 +28,25 @@ type Config struct {
 	DBName   string
 	SSLMode  string
 	MaxConns int32
+	MinConns int32
+
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
 }
 
 // ConfigFromEnv builds a Config from environment variables with sane defaults.
 func ConfigFromEnv() Config {
 	return Config{
-		Host:     envOr("PG_HOST", "localhost"),
-		Port:     envOr("PG_PORT", "5432"),
-		User:     envOr("PG_USER", "via"),
-		Password: envOr("PG_PASSWORD", "via-dev-password"),
-		DBName:   envOr("PG_DATABASE", "via"),
-		SSLMode:  envOr("PG_SSLMODE", "disable"),
-		MaxConns: 20,
+		Host:            envOr("PG_HOST", "localhost"),
+		Port:            envOr("PG_PORT", "5432"),
+		User:            envOr("PG_USER", "via"),
+		Password:        envOr("PG_PASSWORD", "via-dev-password"),
+		DBName:          envOr("PG_DATABASE", "via"),
+		SSLMode:         envOr("PG_SSLMODE", "disable"),
+		MaxConns:        envInt32("PG_MAX_CONNS", 20),
+		MinConns:        envInt32("PG_MIN_CONNS", 2),
+		MaxConnLifetime: envDur("PG_MAX_CONN_LIFETIME", 30*time.Minute),
+		MaxConnIdleTime: envDur("PG_MAX_CONN_IDLE_TIME", 5*time.Minute),
 	}
 }
 
@@ -56,9 +64,9 @@ func Connect(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("parse pg config: %w", err)
 	}
 	poolCfg.MaxConns = cfg.MaxConns
-	poolCfg.MinConns = 2
-	poolCfg.MaxConnLifetime = 30 * time.Minute
-	poolCfg.MaxConnIdleTime = 5 * time.Minute
+	poolCfg.MinConns = cfg.MinConns
+	poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
+	poolCfg.MaxConnIdleTime = cfg.MaxConnIdleTime
 
 	var pool *pgxpool.Pool
 	for attempt := 1; attempt <= 10; attempt++ {
@@ -150,4 +158,28 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envInt32(key string, fallback int32) int32 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err != nil {
+		return fallback
+	}
+	return int32(parsed)
+}
+
+func envDur(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
