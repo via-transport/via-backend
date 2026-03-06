@@ -372,7 +372,7 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, existing)
 }
 
-// ListForVehicle returns all active subscribers for a vehicle.
+// ListForVehicle returns all active subscribers for a vehicle, enriched with passenger info.
 func (h *Handler) ListForVehicle(w http.ResponseWriter, r *http.Request) {
 	vehicleID := r.PathValue("vehicleId")
 	subs, err := h.store.ListForVehicle(r.Context(), vehicleID)
@@ -383,7 +383,25 @@ func (h *Handler) ListForVehicle(w http.ResponseWriter, r *http.Request) {
 	if subs == nil {
 		subs = []Subscription{}
 	}
-	writeJSON(w, http.StatusOK, subs)
+
+	// Enrich with passenger info
+	type enrichedSub struct {
+		Subscription
+		PassengerName  string `json:"passenger_name,omitempty"`
+		PassengerEmail string `json:"passenger_email,omitempty"`
+	}
+	enriched := make([]enrichedSub, 0, len(subs))
+	for _, sub := range subs {
+		es := enrichedSub{Subscription: sub}
+		if h.userStore != nil && sub.UserID != "" {
+			if u, err := h.userStore.GetUser(r.Context(), sub.UserID); err == nil && u != nil {
+				es.PassengerName = strings.TrimSpace(u.DisplayName)
+				es.PassengerEmail = strings.TrimSpace(u.Email)
+			}
+		}
+		enriched = append(enriched, es)
+	}
+	writeJSON(w, http.StatusOK, enriched)
 }
 
 // ListForFleet returns all subscriptions for a fleet, optionally filtered by status.
