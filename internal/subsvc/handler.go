@@ -582,6 +582,22 @@ func (h *Handler) processApproveJoinRequest(payload []byte) {
 		return
 	}
 
+	// Notify passenger that their request was approved.
+	if h.notify != nil {
+		h.notify(ctx,
+			strings.TrimSpace(existing.UserID),
+			strings.TrimSpace(existing.FleetID),
+			strings.TrimSpace(existing.VehicleID),
+			"subscription_update",
+			"Access Approved",
+			"Your access request has been approved. You can now board the vehicle.",
+			map[string]string{
+				"event_type":      "passenger_access_approved",
+				"subscription_id": strings.TrimSpace(existing.ID),
+				"vehicle_id":      strings.TrimSpace(existing.VehicleID),
+			})
+	}
+
 	h.markSucceeded(ctx, op, existing.ID, "Passenger join request approved.")
 }
 
@@ -606,6 +622,22 @@ func (h *Handler) processDenyJoinRequest(payload []byte) {
 		if err := h.store.Put(ctx, existing); err != nil {
 			h.markFailed(ctx, op, "Failed to deny passenger join request.", err)
 			return
+		}
+
+		// Notify passenger that their request was denied.
+		if h.notify != nil {
+			h.notify(ctx,
+				strings.TrimSpace(existing.UserID),
+				strings.TrimSpace(existing.FleetID),
+				strings.TrimSpace(existing.VehicleID),
+				"subscription_update",
+				"Access Request Denied",
+				"Your access request has been denied. You may submit a new request.",
+				map[string]string{
+					"event_type":      "passenger_access_denied",
+					"subscription_id": strings.TrimSpace(existing.ID),
+					"vehicle_id":      strings.TrimSpace(existing.VehicleID),
+				})
 		}
 	}
 
