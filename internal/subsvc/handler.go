@@ -504,7 +504,7 @@ func (h *Handler) processCreateJoinRequest(payload []byte) {
 	op := h.loadOperation(ctx, cmd.OperationID, joinRequestCreateOperationType)
 	h.markProcessing(ctx, op)
 
-	existing, err := h.findExistingJoinRequest(ctx, cmd.Subscription.UserID, cmd.Subscription.VehicleID, cmd.Subscription.FleetID)
+	existing, reusable, err := h.findExistingJoinRequest(ctx, cmd.Subscription.UserID, cmd.Subscription.VehicleID, cmd.Subscription.FleetID)
 	if err != nil {
 		h.markFailed(ctx, op, "Failed to check existing passenger access request.", err)
 		return
@@ -519,6 +519,21 @@ func (h *Handler) processCreateJoinRequest(payload []byte) {
 	}
 
 	now := time.Now().UTC()
+
+	// Reuse an existing denied/cancelled row instead of creating duplicates.
+	if reusable != nil {
+		reusable.Status = "pending"
+		reusable.UpdatedAt = now
+		reusable.Preferences = cmd.Subscription.Preferences
+		if err := h.store.Put(ctx, reusable); err != nil {
+			h.markFailed(ctx, op, "Failed to create passenger access request.", err)
+			return
+		}
+		h.notifyOwnersOfJoinRequest(ctx, reusable)
+		h.markSucceeded(ctx, op, reusable.ID, "Passenger access request queued successfully.")
+		return
+	}
+
 	cmd.Subscription.Status = "pending"
 	if cmd.Subscription.CreatedAt.IsZero() {
 		cmd.Subscription.CreatedAt = now
@@ -602,10 +617,10 @@ func (h *Handler) findExistingJoinRequest(
 	userID string,
 	vehicleID string,
 	fleetID string,
-) (*Subscription, error) {
+) (blocking *Subscription, reusable *Subscription, err error) {
 	items, err := h.store.ListForUser(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i := range items {
 		item := items[i]
@@ -617,10 +632,18 @@ func (h *Handler) findExistingJoinRequest(
 		}
 		if item.Status == "pending" || item.Status == "active" {
 			copy := item
-			return &copy, nil
+			return &copy, nil, nil
+		}
+		// Track the most recent denied/cancelled row so we can reuse it
+		// instead of creating a brand-new row on every retry.
+		if item.Status == "denied" || item.Status == "cancelled" {
+			if reusable == nil || item.UpdatedAt.After(reusable.UpdatedAt) {
+				copy := item
+				reusable = &copy
+			}
 		}
 	}
-	return nil, nil
+	return nil, reusable, nil
 }
 
 func (h *Handler) buildJoinRequestView(ctx context.Context, item *Subscription) JoinRequest {
