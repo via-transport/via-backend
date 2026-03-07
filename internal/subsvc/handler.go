@@ -38,6 +38,11 @@ type joinRequestDecisionCommand struct {
 	FleetID     string `json:"fleet_id,omitempty"`
 }
 
+// NotifyFunc is a callback for sending notifications without importing
+// notifysvc (which already imports subsvc, so a direct import would cycle).
+// Parameters: ctx, userID, fleetID, vehicleID, notifType, title, body, data.
+type NotifyFunc func(ctx context.Context, userID, fleetID, vehicleID, notifType, title, body string, data map[string]string)
+
 // Handler provides subscription REST endpoints.
 type Handler struct {
 	store     SubStore
@@ -45,6 +50,7 @@ type Handler struct {
 	broker    *messaging.Broker
 	opsStore  opsvc.Store
 	userStore authsvc.UserStore
+	notify    NotifyFunc
 }
 
 // NewHandler creates a subscription handler.
@@ -54,6 +60,7 @@ func NewHandler(
 	broker *messaging.Broker,
 	opsStore opsvc.Store,
 	userStore authsvc.UserStore,
+	notify NotifyFunc,
 ) *Handler {
 	return &Handler{
 		store:     store,
@@ -61,6 +68,7 @@ func NewHandler(
 		broker:    broker,
 		opsStore:  opsStore,
 		userStore: userStore,
+		notify:    notify,
 	}
 }
 
@@ -522,6 +530,7 @@ func (h *Handler) processCreateJoinRequest(payload []byte) {
 		return
 	}
 
+	h.notifyOwnersOfJoinRequest(ctx, &cmd.Subscription)
 	h.markSucceeded(ctx, op, cmd.Subscription.ID, "Passenger access request queued successfully.")
 }
 
@@ -811,4 +820,50 @@ func writePolicyError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSON(w, http.StatusForbidden, errBody(err.Error()))
+}
+
+// notifyOwnersOfJoinRequest sends a notification to all fleet owners
+// when a passenger submits (or retries) a join request.
+func (h *Handler) notifyOwnersOfJoinRequest(ctx context.Context, sub *Subscription) {
+	if h.notify == nil || h.userStore == nil || sub == nil {
+		return
+	}
+	fleetID := strings.TrimSpace(sub.FleetID)
+	if fleetID == "" {
+		return
+	}
+
+	owners, err := h.userStore.ListUsers(ctx, "owner", fleetID)
+	if err != nil {
+		log.Printf("[join-requests] load owners for notifications: %v", err)
+		return
+	}
+
+	// Look up passenger display name / email.
+	passengerLabel := "A passenger"
+	if user, lookupErr := h.userStore.GetUser(ctx, strings.TrimSpace(sub.UserID)); lookupErr == nil && user != nil {
+		name := strings.TrimSpace(user.DisplayName)
+		if name != "" {
+			passengerLabel = name
+		} else if email := strings.TrimSpace(user.Email); email != "" {
+			passengerLabel = email
+		}
+	}
+
+	title := "Passenger Access Request"
+	body := passengerLabel + " requested access to a vehicle and is waiting for your approval."
+
+	for i := range owners {
+		ownerID := strings.TrimSpace(owners[i].ID)
+		if ownerID == "" {
+			continue
+		}
+		h.notify(ctx, ownerID, fleetID, strings.TrimSpace(sub.VehicleID),
+			"passenger_request", title, body, map[string]string{
+				"event_type":   "passenger_access_request_created",
+				"request_id":   strings.TrimSpace(sub.ID),
+				"vehicle_id":   strings.TrimSpace(sub.VehicleID),
+				"passenger_id": strings.TrimSpace(sub.UserID),
+			})
+	}
 }

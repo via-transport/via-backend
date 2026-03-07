@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 
 	"via-backend/internal/appcache"
 	"via-backend/internal/auth"
@@ -247,6 +250,7 @@ func main() {
 		broker,
 		operationStore,
 		authStore,
+		newSubNotifyFunc(notifyStore, broker),
 	)
 	requestHandler := requestsvc.NewHandler(
 		driverRequestStore,
@@ -329,4 +333,47 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// newSubNotifyFunc creates a subsvc.NotifyFunc that persists a notification
+// and pushes it to the target user via NATS (for WebSocket delivery).
+func newSubNotifyFunc(store notifysvc.NotifStore, broker *messaging.Broker) subsvc.NotifyFunc {
+	return func(ctx context.Context, userID, fleetID, vehicleID, notifType, title, body string, data map[string]string) {
+		if store == nil || userID == "" {
+			return
+		}
+		n := &notifysvc.Notification{
+			ID:        uuid.NewString(),
+			UserID:    userID,
+			FleetID:   fleetID,
+			VehicleID: vehicleID,
+			Type:      notifType,
+			Title:     title,
+			Body:      body,
+			Data:      data,
+			IsRead:    false,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := store.Put(ctx, n); err != nil {
+			log.Printf("[subsvc-notify] store notification for %s: %v", userID, err)
+			return
+		}
+
+		unread, _ := store.CountUnread(ctx, userID)
+		payload := notifysvc.NotificationPayload{
+			Action:       "new",
+			Notification: n,
+			UnreadCount:  unread,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		if broker != nil {
+			subject := "notify." + userID
+			if pubErr := broker.Publish(subject, raw); pubErr != nil {
+				log.Printf("[subsvc-notify] publish notification %s: %v", subject, pubErr)
+			}
+		}
+	}
 }
