@@ -476,6 +476,22 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errBody("revoke failed"))
 		return
 	}
+	if h.notify != nil {
+		h.notify(
+			r.Context(),
+			strings.TrimSpace(existing.UserID),
+			strings.TrimSpace(existing.FleetID),
+			strings.TrimSpace(existing.VehicleID),
+			"subscription_update",
+			"Access Revoked",
+			"Your vehicle tracking access was revoked by the owner.",
+			map[string]string{
+				"event_type":      "passenger_access_revoked",
+				"subscription_id": strings.TrimSpace(existing.ID),
+				"vehicle_id":      strings.TrimSpace(existing.VehicleID),
+			},
+		)
+	}
 	log.Printf("[subsvc] subscription %s revoked by admin (fleet=%s, vehicle=%s, user=%s)",
 		subID, existing.FleetID, existing.VehicleID, existing.UserID)
 	writeJSON(w, http.StatusOK, existing)

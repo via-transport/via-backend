@@ -268,3 +268,60 @@ func TestListJoinRequestsIncludesPassengerReviewData(t *testing.T) {
 		t.Fatalf("expected passenger_joined_at to equal %v, got %v", joinedAt, item.PassengerJoinedAt)
 	}
 }
+
+func TestRevokeNotifiesPassengerAndPersistsRevokedStatus(t *testing.T) {
+	subStore := &subsvcTestSubStore{
+		items: map[string]Subscription{
+			"sub-1": {
+				ID:        "sub-1",
+				UserID:    "passenger-1",
+				VehicleID: "veh-1",
+				FleetID:   "fleet-1",
+				Status:    "active",
+				CreatedAt: time.Now().UTC().Add(-time.Hour),
+				UpdatedAt: time.Now().UTC().Add(-time.Hour),
+			},
+		},
+	}
+	type recordedNotif struct {
+		userID string
+		data   map[string]string
+	}
+	var notifications []recordedNotif
+
+	handler := &Handler{
+		store: subStore,
+		notify: func(_ context.Context, userID, _, _, _, _, _ string, data map[string]string) {
+			notifications = append(notifications, recordedNotif{
+				userID: userID,
+				data:   data,
+			})
+		},
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/subscriptions/sub-1/revoke", nil)
+	req.SetPathValue("id", "sub-1")
+	rec := httptest.NewRecorder()
+
+	handler.Revoke(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	updated, err := subStore.GetByID(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("expected revoked subscription to be persisted: %v", err)
+	}
+	if updated.Status != "revoked" {
+		t.Fatalf("expected status revoked, got %q", updated.Status)
+	}
+	if len(notifications) != 1 {
+		t.Fatalf("expected exactly one passenger notification, got %d", len(notifications))
+	}
+	if notifications[0].userID != "passenger-1" {
+		t.Fatalf("expected notification user passenger-1, got %q", notifications[0].userID)
+	}
+	if notifications[0].data["event_type"] != "passenger_access_revoked" {
+		t.Fatalf("expected event_type passenger_access_revoked, got %q", notifications[0].data["event_type"])
+	}
+}
