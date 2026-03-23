@@ -7,22 +7,23 @@ import "time"
 
 // User is the persistent user record stored in NATS KV.
 type User struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"password_hash,omitempty"` // bcrypt hash – never sent to clients
-	DisplayName  string    `json:"display_name"`
-	Phone        string    `json:"phone,omitempty"`
-	PhotoURL     string    `json:"photo_url,omitempty"`
-	Workplace    string    `json:"workplace,omitempty"`
-	Address      string    `json:"address,omitempty"`
-	EmployeeNo   string    `json:"employee_number,omitempty"`
-	Role         string    `json:"role"`     // owner | admin | driver | passenger
-	FleetID      string    `json:"fleet_id"` // tenant scope
-	VehicleID    string    `json:"vehicle_id,omitempty"`
-	IsActive     bool      `json:"is_active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	LastLoginAt  time.Time `json:"last_login_at,omitempty"`
+	ID            string    `json:"id"`
+	Email         string    `json:"email"`
+	PasswordHash  string    `json:"password_hash,omitempty"` // bcrypt hash – never sent to clients
+	GoogleSubject string    `json:"google_subject,omitempty"`
+	DisplayName   string    `json:"display_name"`
+	Phone         string    `json:"phone,omitempty"`
+	PhotoURL      string    `json:"photo_url,omitempty"`
+	Workplace     string    `json:"workplace,omitempty"`
+	Address       string    `json:"address,omitempty"`
+	EmployeeNo    string    `json:"employee_number,omitempty"`
+	Role          string    `json:"role"`     // owner | admin | driver | passenger
+	FleetID       string    `json:"fleet_id"` // tenant scope
+	VehicleID     string    `json:"vehicle_id,omitempty"`
+	IsActive      bool      `json:"is_active"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	LastLoginAt   time.Time `json:"last_login_at,omitempty"`
 }
 
 // UserPublic is the public-facing user profile (no password hash).
@@ -84,6 +85,14 @@ type RegisterRequest struct {
 	DisplayName string `json:"display_name"`
 	Role        string `json:"role,omitempty"` // defaults to "passenger"
 	FleetID     string `json:"fleet_id,omitempty"`
+}
+
+type GoogleAuthRequest struct {
+	IDToken     string `json:"id_token"`
+	AccessToken string `json:"access_token,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	PhotoURL    string `json:"photo_url,omitempty"`
+	Role        string `json:"role,omitempty"` // defaults to "owner"
 }
 
 type SetupOwnerFleetRequest struct {

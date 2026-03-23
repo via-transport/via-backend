@@ -76,6 +76,9 @@ type Config struct {
 	JWTRefreshTTL time.Duration
 	JWTIssuer     string
 
+	// Google auth
+	GoogleAuthClientIDs string
+
 	// Store backend: "postgres" or "nats" (default postgres)
 	StoreBackend string
 
@@ -150,6 +153,9 @@ func Load() Config {
 		JWTAccessTTL:  envDur("JWT_ACCESS_TTL", 1*time.Hour),
 		JWTRefreshTTL: envDur("JWT_REFRESH_TTL", 7*24*time.Hour),
 		JWTIssuer:     envStr("JWT_ISSUER", "via-backend"),
+
+		// Google auth
+		GoogleAuthClientIDs: envStr("GOOGLE_AUTH_CLIENT_IDS", ""),
 
 		// Store
 		StoreBackend: envStr("STORE_BACKEND", "postgres"),

@@ -80,7 +80,7 @@ func (s *PGStore) SetupOwnerFleet(ctx context.Context, userID string, tenant *te
 	}()
 
 	user, err := s.scanUser(tx.QueryRow(ctx, `
-		SELECT id, email, password_hash, display_name, phone, photo_url, workplace, address, employee_number,
+		SELECT id, email, password_hash, google_subject, display_name, phone, photo_url, workplace, address, employee_number,
 		       role, fleet_id, vehicle_id, is_active, created_at, updated_at, last_login_at
 		FROM users
 		WHERE id = $1
@@ -143,18 +143,29 @@ type userExec interface {
 
 func (s *PGStore) insertUser(ctx context.Context, exec userExec, user *User) error {
 	_, err := exec.Exec(ctx, `
-		INSERT INTO users (id, email, password_hash, display_name, phone, photo_url,
+		INSERT INTO users (id, email, password_hash, google_subject, display_name, phone, photo_url,
 		                    workplace, address, employee_number, role, fleet_id, vehicle_id, is_active, created_at, updated_at, last_login_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 	`,
 		user.ID, strings.ToLower(strings.TrimSpace(user.Email)),
-		user.PasswordHash, user.DisplayName,
+		user.PasswordHash, user.GoogleSubject, user.DisplayName,
 		user.Phone, user.PhotoURL, user.Workplace, user.Address, user.EmployeeNo,
 		user.Role, user.FleetID, user.VehicleID, user.IsActive,
 		user.CreatedAt, user.UpdatedAt, nilTime(user.LastLoginAt),
 	)
 	if err != nil {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+			switch pgErr.ConstraintName {
+			case "idx_users_google_subject":
+				return errors.New("google account already linked")
+			default:
+				return errors.New("email already registered")
+			}
+		}
 		if isUniqueViolation(err) {
+			if strings.Contains(err.Error(), "google_subject") {
+				return errors.New("google account already linked")
+			}
 			return errors.New("email already registered")
 		}
 		return fmt.Errorf("insert user: %w", err)
@@ -164,7 +175,7 @@ func (s *PGStore) insertUser(ctx context.Context, exec userExec, user *User) err
 
 func (s *PGStore) GetUser(ctx context.Context, userID string) (*User, error) {
 	return s.scanUser(s.pool.QueryRow(ctx, `
-		SELECT id, email, password_hash, display_name, phone, photo_url, workplace, address, employee_number,
+		SELECT id, email, password_hash, google_subject, display_name, phone, photo_url, workplace, address, employee_number,
 		       role, fleet_id, vehicle_id, is_active, created_at, updated_at, last_login_at
 		FROM users WHERE id = $1
 	`, userID))
@@ -172,7 +183,7 @@ func (s *PGStore) GetUser(ctx context.Context, userID string) (*User, error) {
 
 func (s *PGStore) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	return s.scanUser(s.pool.QueryRow(ctx, `
-		SELECT id, email, password_hash, display_name, phone, photo_url, workplace, address, employee_number,
+		SELECT id, email, password_hash, google_subject, display_name, phone, photo_url, workplace, address, employee_number,
 		       role, fleet_id, vehicle_id, is_active, created_at, updated_at, last_login_at
 		FROM users WHERE email = $1
 	`, strings.ToLower(strings.TrimSpace(email))))
@@ -181,13 +192,13 @@ func (s *PGStore) GetUserByEmail(ctx context.Context, email string) (*User, erro
 func (s *PGStore) UpdateUser(ctx context.Context, user *User) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE users SET
-			email=$2, password_hash=$3, display_name=$4, phone=$5, photo_url=$6,
-			workplace=$7, address=$8, employee_number=$9,
-			role=$10, fleet_id=$11, vehicle_id=$12, is_active=$13,
-			updated_at=$14, last_login_at=$15
+			email=$2, password_hash=$3, google_subject=$4, display_name=$5, phone=$6, photo_url=$7,
+			workplace=$8, address=$9, employee_number=$10,
+			role=$11, fleet_id=$12, vehicle_id=$13, is_active=$14,
+			updated_at=$15, last_login_at=$16
 		WHERE id=$1
 	`,
-		user.ID, user.Email, user.PasswordHash, user.DisplayName,
+		user.ID, user.Email, user.PasswordHash, user.GoogleSubject, user.DisplayName,
 		user.Phone, user.PhotoURL, user.Workplace, user.Address, user.EmployeeNo,
 		user.Role, user.FleetID, user.VehicleID, user.IsActive,
 		user.UpdatedAt, nilTime(user.LastLoginAt),
@@ -196,7 +207,7 @@ func (s *PGStore) UpdateUser(ctx context.Context, user *User) error {
 }
 
 func (s *PGStore) ListUsers(ctx context.Context, filterRole, filterFleet string) ([]User, error) {
-	query := `SELECT id, email, '', display_name, phone, photo_url, workplace, address, employee_number,
+	query := `SELECT id, email, '', '', display_name, phone, photo_url, workplace, address, employee_number,
 	                  role, fleet_id, vehicle_id, is_active, created_at, updated_at, last_login_at
 	           FROM users WHERE 1=1`
 	args := []interface{}{}
@@ -236,7 +247,7 @@ func (s *PGStore) scanUser(row pgx.Row) (*User, error) {
 	var u User
 	var lastLogin *interface{}
 	err := row.Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName,
+		&u.ID, &u.Email, &u.PasswordHash, &u.GoogleSubject, &u.DisplayName,
 		&u.Phone, &u.PhotoURL, &u.Workplace, &u.Address, &u.EmployeeNo, &u.Role,
 		&u.FleetID, &u.VehicleID, &u.IsActive,
 		&u.CreatedAt, &u.UpdatedAt, &lastLogin,
@@ -254,7 +265,7 @@ func (s *PGStore) scanUserFromRows(rows pgx.Rows) (*User, error) {
 	var u User
 	var lastLogin *interface{}
 	err := rows.Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName,
+		&u.ID, &u.Email, &u.PasswordHash, &u.GoogleSubject, &u.DisplayName,
 		&u.Phone, &u.PhotoURL, &u.Workplace, &u.Address, &u.EmployeeNo, &u.Role,
 		&u.FleetID, &u.VehicleID, &u.IsActive,
 		&u.CreatedAt, &u.UpdatedAt, &lastLogin,

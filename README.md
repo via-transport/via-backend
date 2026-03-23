@@ -49,6 +49,13 @@ go run ./cmd/server
 ## Environment
 - `LISTEN_ADDR` default `:9090`
 - `NATS_URL` default `nats://127.0.0.1:4222`
+- `GOOGLE_AUTH_CLIENT_IDS` comma-separated Google OAuth client IDs allowed for `/api/v1/auth/google`
+
+Example:
+
+```bash
+export GOOGLE_AUTH_CLIENT_IDS=your-web-client-id.apps.googleusercontent.com
+```
 
 ## API examples
 

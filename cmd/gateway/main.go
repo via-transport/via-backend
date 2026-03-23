@@ -224,6 +224,7 @@ func main() {
 		return auth.IdentityFromContext(r.Context()).UserID
 	})
 	authHandler.SetOwnerProvisioner(authsvc.NewOwnerAccountRegistrar(authStore, tenantStore))
+	authHandler.SetGoogleAudiences(strings.Split(cfg.GoogleAuthClientIDs, ","))
 
 	tenantHandler := tenantsvc.NewHandler(tenantStore, tenantPolicy)
 

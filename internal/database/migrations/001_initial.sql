@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
     id            TEXT PRIMARY KEY,
     email         TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL DEFAULT '',
+    google_subject TEXT NOT NULL DEFAULT '',
     display_name  TEXT NOT NULL DEFAULT '',
     phone         TEXT NOT NULL DEFAULT '',
     photo_url     TEXT NOT NULL DEFAULT '',
@@ -24,6 +25,8 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email    ON users (email);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject
+    ON users (google_subject) WHERE google_subject != '';
 CREATE INDEX IF NOT EXISTS idx_users_role     ON users (role);
 CREATE INDEX IF NOT EXISTS idx_users_fleet_id ON users (fleet_id) WHERE fleet_id != '';
 

@@ -22,11 +22,17 @@ type Handler struct {
 	jwtCfg           JWTConfig
 	userIDFromReq    UserIDFunc
 	ownerProvisioner OwnerFleetProvisioner
+	googleVerifier   GoogleIDTokenVerifier
+	googleAudiences  []string
 }
 
 // NewHandler creates auth handlers.
 func NewHandler(store UserStore, jwtCfg JWTConfig) *Handler {
-	return &Handler{store: store, jwtCfg: jwtCfg}
+	return &Handler{
+		store:          store,
+		jwtCfg:         jwtCfg,
+		googleVerifier: NewGoogleIDTokenVerifier(),
+	}
 }
 
 // SetUserIDFunc sets the function used to extract user ID from request context.
@@ -41,10 +47,21 @@ func (h *Handler) SetOwnerProvisioner(provisioner OwnerFleetProvisioner) {
 	h.ownerProvisioner = provisioner
 }
 
+// SetGoogleIDTokenVerifier overrides the Google token verifier.
+func (h *Handler) SetGoogleIDTokenVerifier(verifier GoogleIDTokenVerifier) {
+	h.googleVerifier = verifier
+}
+
+// SetGoogleAudiences sets the allowed Google OAuth client IDs for ID tokens.
+func (h *Handler) SetGoogleAudiences(audiences []string) {
+	h.googleAudiences = normalizeGoogleAudiences(audiences)
+}
+
 // Mount registers all auth routes on the mux.
 func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/register", h.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", h.Login)
+	mux.HandleFunc("POST /api/v1/auth/google", h.GoogleAuth)
 	mux.HandleFunc("POST /api/v1/auth/refresh", h.Refresh)
 	mux.HandleFunc("POST /api/v1/auth/owner/setup-fleet", h.SetupOwnerFleet)
 	mux.HandleFunc("GET /api/v1/auth/users", h.SearchUsers)
@@ -267,17 +284,120 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update last login.
-	user.LastLoginAt = time.Now().UTC()
-	_ = h.store.UpdateUser(r.Context(), user)
+	h.issueAuthPair(w, r, user)
+}
 
-	pair, err := GenerateTokenPair(h.jwtCfg, user)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
+// GoogleAuth handles POST /api/v1/auth/google.
+func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
+	if h.googleVerifier == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("google sign-in unavailable"))
+		return
+	}
+	if len(h.googleAudiences) == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("google sign-in is not configured"))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, pair)
+	var req GoogleAuthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
+		return
+	}
+
+	identity, err := h.googleVerifier.Verify(r.Context(), req.IDToken, h.googleAudiences)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, errBody("invalid google token"))
+		return
+	}
+	if identity.Email == "" || !identity.EmailVerified {
+		writeJSON(w, http.StatusUnauthorized, errBody("google account email must be verified"))
+		return
+	}
+	if identity.Subject == "" {
+		writeJSON(w, http.StatusUnauthorized, errBody("google account subject missing"))
+		return
+	}
+
+	user, err := h.store.GetUserByEmail(r.Context(), identity.Email)
+	switch {
+	case err == nil:
+		if user.GoogleSubject != "" && user.GoogleSubject != identity.Subject {
+			writeJSON(w, http.StatusConflict, errBody("google account does not match the existing user"))
+			return
+		}
+		if !user.IsActive {
+			writeJSON(w, http.StatusForbidden, errBody("account disabled"))
+			return
+		}
+
+		user.GoogleSubject = identity.Subject
+		if user.DisplayName == "" {
+			user.DisplayName = firstNonEmpty(strings.TrimSpace(req.DisplayName), identity.DisplayName, strings.Split(identity.Email, "@")[0])
+		}
+		if user.PhotoURL == "" {
+			user.PhotoURL = firstNonEmpty(strings.TrimSpace(req.PhotoURL), identity.Picture)
+		}
+		h.issueAuthPair(w, r, user)
+		return
+
+	case isNotFoundError(err):
+		role := normalizeGoogleRegistrationRole(req.Role)
+		if role == "" {
+			writeJSON(w, http.StatusBadRequest, errBody("role must be passenger, driver, or owner"))
+			return
+		}
+
+		now := time.Now().UTC()
+		user = &User{
+			ID:            uuid.New().String(),
+			Email:         identity.Email,
+			GoogleSubject: identity.Subject,
+			DisplayName: firstNonEmpty(
+				strings.TrimSpace(req.DisplayName),
+				identity.DisplayName,
+				strings.Split(identity.Email, "@")[0],
+			),
+			PhotoURL: firstNonEmpty(
+				strings.TrimSpace(req.PhotoURL),
+				identity.Picture,
+			),
+			Role:        role,
+			IsActive:    true,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			LastLoginAt: now,
+		}
+
+		if err := h.store.CreateUser(r.Context(), user); err != nil {
+			switch {
+			case strings.Contains(err.Error(), "email already registered"):
+				writeJSON(w, http.StatusConflict, errBody("email already registered"))
+				return
+			case strings.Contains(err.Error(), "google account already linked"):
+				writeJSON(w, http.StatusConflict, errBody("google account is already linked to another user"))
+				return
+			case strings.Contains(err.Error(), "fleet already registered"):
+				writeJSON(w, http.StatusConflict, errBody("fleet already registered"))
+				return
+			}
+			log.Printf("[auth] create google user: %v", err)
+			writeJSON(w, http.StatusInternalServerError, errBody("google sign-in failed"))
+			return
+		}
+
+		pair, pairErr := GenerateTokenPair(h.jwtCfg, user)
+		if pairErr != nil {
+			writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
+			return
+		}
+		writeJSON(w, http.StatusOK, pair)
+		return
+
+	default:
+		log.Printf("[auth] lookup google user by email: %v", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("google sign-in failed"))
+		return
+	}
 }
 
 // Refresh handles POST /api/v1/auth/refresh.
@@ -475,4 +595,56 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func errBody(msg string) map[string]string {
 	return map[string]string{"error": msg}
+}
+
+func (h *Handler) issueAuthPair(w http.ResponseWriter, r *http.Request, user *User) {
+	now := time.Now().UTC()
+	user.LastLoginAt = now
+	if user.CreatedAt.IsZero() {
+		user.CreatedAt = now
+	}
+	user.UpdatedAt = now
+	if err := h.store.UpdateUser(r.Context(), user); err != nil {
+		log.Printf("[auth] update user login timestamp: %v", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("login failed"))
+		return
+	}
+
+	pair, err := GenerateTokenPair(h.jwtCfg, user)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, pair)
+}
+
+func normalizeGoogleRegistrationRole(role string) string {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "" {
+		return "owner"
+	}
+	switch role {
+	case "passenger", "driver", "owner":
+		return role
+	default:
+		return ""
+	}
+}
+
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not found")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
