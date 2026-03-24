@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"via-backend/internal/auth"
 	"via-backend/internal/authsvc"
 	"via-backend/internal/fleetsvc"
 	"via-backend/internal/messaging"
@@ -99,11 +100,46 @@ func (h *Handler) SubscribeCommands() error {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	identity := auth.IdentityFromContext(r.Context())
 	fleetID := strings.TrimSpace(r.URL.Query().Get("fleet_id"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	requestType := strings.TrimSpace(r.URL.Query().Get("request_type"))
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
 	if status == "" {
 		status = StatusPending
+	}
+	switch identity.Role {
+	case auth.RoleOwner, auth.RoleAdmin:
+		if fleetID == "" {
+			fleetID = strings.TrimSpace(identity.FleetID)
+		}
+		if fleetID == "" {
+			writeJSON(w, http.StatusBadRequest, errBody("fleet_id is required"))
+			return
+		}
+		if !canManageFleetDriverRequests(identity, fleetID) {
+			writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+	case auth.RoleDriver:
+		if identity.UserID == "" {
+			writeJSON(w, http.StatusUnauthorized, errBody("authentication required"))
+			return
+		}
+		if userID == "" {
+			userID = identity.UserID
+		}
+		if userID != identity.UserID {
+			writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+		if fleetID != "" && identity.FleetID != "" && fleetID != identity.FleetID {
+			writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+	default:
+		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+		return
 	}
 	items, err := h.store.List(r.Context(), fleetID, status, requestType)
 	if err != nil {
@@ -112,6 +148,16 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	if items == nil {
 		items = []DriverRequest{}
+	}
+	if userID != "" {
+		filtered := make([]DriverRequest, 0, len(items))
+		for _, item := range items {
+			if strings.TrimSpace(item.UserID) != userID {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		items = filtered
 	}
 	writeJSON(w, http.StatusOK, items)
 }
@@ -142,6 +188,26 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	req.RequestType = requestType
 	if req.RequestType == RequestTypeAccess {
 		req.VehicleID = ""
+	}
+	identity := auth.IdentityFromContext(r.Context())
+	switch identity.Role {
+	case auth.RoleOwner, auth.RoleAdmin:
+		if !canManageFleetDriverRequests(identity, req.FleetID) {
+			writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+	case auth.RoleDriver:
+		if identity.UserID == "" || identity.UserID != req.UserID {
+			writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+		if identity.FleetID != "" && req.FleetID != identity.FleetID {
+			writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+	default:
+		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+		return
 	}
 	if req.RequestType == RequestTypeVehicleAssignment {
 		if _, err := h.fleetStore.GetDriver(r.Context(), req.FleetID, req.UserID); err != nil {
@@ -182,9 +248,19 @@ func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := driverRequestDecisionCommand{RequestID: reqID}
-	if existing, err := h.store.Get(r.Context(), reqID); err == nil && existing != nil {
-		cmd.FleetID = strings.TrimSpace(existing.FleetID)
+	existing, err := h.store.Get(r.Context(), reqID)
+	if err != nil || existing == nil {
+		writeJSON(w, http.StatusNotFound, errBody("driver request not found"))
+		return
+	}
+	identity := auth.IdentityFromContext(r.Context())
+	if !canManageFleetDriverRequests(identity, strings.TrimSpace(existing.FleetID)) {
+		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+		return
+	}
+	cmd := driverRequestDecisionCommand{
+		RequestID: reqID,
+		FleetID:   strings.TrimSpace(existing.FleetID),
 	}
 	if err := h.enqueueCommand(
 		r.Context(),
@@ -212,9 +288,19 @@ func (h *Handler) Deny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := driverRequestDecisionCommand{RequestID: reqID}
-	if existing, err := h.store.Get(r.Context(), reqID); err == nil && existing != nil {
-		cmd.FleetID = strings.TrimSpace(existing.FleetID)
+	existing, err := h.store.Get(r.Context(), reqID)
+	if err != nil || existing == nil {
+		writeJSON(w, http.StatusNotFound, errBody("driver request not found"))
+		return
+	}
+	identity := auth.IdentityFromContext(r.Context())
+	if !canManageFleetDriverRequests(identity, strings.TrimSpace(existing.FleetID)) {
+		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+		return
+	}
+	cmd := driverRequestDecisionCommand{
+		RequestID: reqID,
+		FleetID:   strings.TrimSpace(existing.FleetID),
 	}
 	if err := h.enqueueCommand(
 		r.Context(),
@@ -242,9 +328,21 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := driverRequestDecisionCommand{RequestID: reqID}
-	if existing, err := h.store.Get(r.Context(), reqID); err == nil && existing != nil {
-		cmd.FleetID = strings.TrimSpace(existing.FleetID)
+	existing, err := h.store.Get(r.Context(), reqID)
+	if err != nil || existing == nil {
+		writeJSON(w, http.StatusNotFound, errBody("driver request not found"))
+		return
+	}
+	identity := auth.IdentityFromContext(r.Context())
+	isOwner := canManageFleetDriverRequests(identity, strings.TrimSpace(existing.FleetID))
+	isSelfDriver := identity.Role == auth.RoleDriver && strings.TrimSpace(identity.UserID) == strings.TrimSpace(existing.UserID)
+	if !isOwner && !isSelfDriver {
+		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+		return
+	}
+	cmd := driverRequestDecisionCommand{
+		RequestID: reqID,
+		FleetID:   strings.TrimSpace(existing.FleetID),
 	}
 	if err := h.enqueueCommand(
 		r.Context(),
@@ -1007,6 +1105,17 @@ func normalizeIdempotencyKey(opType, raw string) string {
 		return ""
 	}
 	return opType + ":" + normalized
+}
+
+func canManageFleetDriverRequests(identity auth.Identity, fleetID string) bool {
+	normalizedFleetID := strings.TrimSpace(fleetID)
+	if normalizedFleetID == "" {
+		return false
+	}
+	if identity.Role != auth.RoleOwner && identity.Role != auth.RoleAdmin {
+		return false
+	}
+	return strings.TrimSpace(identity.FleetID) == normalizedFleetID
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

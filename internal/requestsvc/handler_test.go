@@ -1,13 +1,17 @@
 package requestsvc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"via-backend/internal/auth"
 	"via-backend/internal/authsvc"
 	"via-backend/internal/fleetsvc"
 	"via-backend/internal/notifysvc"
@@ -800,6 +804,149 @@ func TestNotifyOwnersOfPendingRequestCreatesOwnerNotifications(t *testing.T) {
 		notifStore.items[0].Type != "driver_request" ||
 		notifStore.items[0].Data["event_type"] != "driver_access_request_created" {
 		t.Fatalf("expected owner access-request notification, got %#v", notifStore.items[0])
+	}
+}
+
+func TestListAllowsDriverToSeeOnlyOwnRequests(t *testing.T) {
+	t.Parallel()
+
+	requestStore := &handlerTestRequestStore{
+		items: map[string]*DriverRequest{
+			"request-1": {
+				ID:          "request-1",
+				UserID:      "driver-1",
+				FleetID:     "fleet-1",
+				RequestType: RequestTypeAccess,
+				Status:      StatusPending,
+			},
+			"request-2": {
+				ID:          "request-2",
+				UserID:      "driver-2",
+				FleetID:     "fleet-2",
+				RequestType: RequestTypeAccess,
+				Status:      StatusPending,
+			},
+		},
+	}
+	handler := &Handler{store: requestStore}
+	mux := http.NewServeMux()
+	handler.Mount(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/driver-requests?status=pending", nil)
+	req = req.WithContext(auth.ContextWithIdentity(req.Context(), auth.Identity{
+		UserID: "driver-1",
+		Role:   auth.RoleDriver,
+	}))
+	recorder := httptest.NewRecorder()
+
+	mux.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var items []DriverRequest
+	if err := json.Unmarshal(recorder.Body.Bytes(), &items); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "request-1" {
+		t.Fatalf("expected only driver-1 request, got %#v", items)
+	}
+}
+
+func TestCreateRejectsDriverImpersonation(t *testing.T) {
+	t.Parallel()
+
+	handler := &Handler{}
+	mux := http.NewServeMux()
+	handler.Mount(mux)
+
+	body := bytes.NewBufferString(`{
+		"user_id":"driver-2",
+		"fleet_id":"fleet-1",
+		"request_type":"access",
+		"full_name":"Driver Two",
+		"email":"driver-2@example.com"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/driver-requests", body)
+	req = req.WithContext(auth.ContextWithIdentity(req.Context(), auth.Identity{
+		UserID: "driver-1",
+		Role:   auth.RoleDriver,
+	}))
+	recorder := httptest.NewRecorder()
+
+	mux.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestApproveRejectsDriverIdentity(t *testing.T) {
+	t.Parallel()
+
+	requestStore := &handlerTestRequestStore{
+		items: map[string]*DriverRequest{
+			"request-1": {
+				ID:          "request-1",
+				UserID:      "driver-1",
+				FleetID:     "fleet-1",
+				RequestType: RequestTypeVehicleAssignment,
+				VehicleID:   "vehicle-1",
+				Status:      StatusPending,
+			},
+		},
+	}
+	handler := &Handler{store: requestStore}
+	mux := http.NewServeMux()
+	handler.Mount(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/driver-requests/request-1/approve", nil)
+	req = req.WithContext(auth.ContextWithIdentity(req.Context(), auth.Identity{
+		UserID:  "driver-1",
+		Role:    auth.RoleDriver,
+		FleetID: "fleet-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	mux.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestApproveRejectsDevServiceIdentity(t *testing.T) {
+	t.Parallel()
+
+	requestStore := &handlerTestRequestStore{
+		items: map[string]*DriverRequest{
+			"request-1": {
+				ID:          "request-1",
+				UserID:      "driver-1",
+				FleetID:     "fleet-1",
+				RequestType: RequestTypeVehicleAssignment,
+				VehicleID:   "vehicle-1",
+				Status:      StatusPending,
+			},
+		},
+	}
+	handler := &Handler{store: requestStore}
+	mux := http.NewServeMux()
+	handler.Mount(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/driver-requests/request-1/approve", nil)
+	req = req.WithContext(auth.ContextWithIdentity(req.Context(), auth.Identity{
+		UserID:  "dev",
+		Role:    auth.RoleService,
+		FleetID: "fleet-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	mux.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
