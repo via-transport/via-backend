@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 
 	"via-backend/internal/authsvc"
+	"via-backend/internal/logx"
 	viasentry "via-backend/internal/sentry"
 )
 
@@ -92,6 +92,12 @@ func Middleware(cfg MiddlewareConfig) func(http.Handler) http.Handler {
 					}
 				}
 				ctx := ContextWithIdentity(r.Context(), id)
+				logx.Logger(ctx).Info(
+					"auth bypassed because middleware is disabled",
+					"user_id", id.UserID,
+					"role", id.Role,
+					"path", r.URL.Path,
+				)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -101,9 +107,19 @@ func Middleware(cfg MiddlewareConfig) func(http.Handler) http.Handler {
 				if id, ok := cfg.APIKeys[apiKey]; ok {
 					ctx := ContextWithIdentity(r.Context(), id)
 					viasentry.SetUser(r, id.UserID, id.Email, string(id.Role))
+					logx.Logger(ctx).Info(
+						"request authenticated with api key",
+						"user_id", id.UserID,
+						"role", id.Role,
+						"path", r.URL.Path,
+					)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
+				logx.Logger(r.Context()).Warn(
+					"request rejected because api key is invalid",
+					"path", r.URL.Path,
+				)
 				writeAuthError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
@@ -114,16 +130,31 @@ func Middleware(cfg MiddlewareConfig) func(http.Handler) http.Handler {
 				token := strings.TrimPrefix(authHeader, "Bearer ")
 				id, err := validateJWT(cfg.JWTSecret, token)
 				if err != nil {
-					log.Printf("[auth] jwt validate: %v", err)
+					logx.Logger(r.Context()).Warn(
+						"request rejected because bearer token is invalid",
+						"path", r.URL.Path,
+						"error", err,
+					)
 					writeAuthError(w, http.StatusUnauthorized, "invalid token")
 					return
 				}
 				ctx := ContextWithIdentity(r.Context(), id)
 				viasentry.SetUser(r, id.UserID, id.Email, string(id.Role))
+				logx.Logger(ctx).Info(
+					"request authenticated with bearer token",
+					"user_id", id.UserID,
+					"role", id.Role,
+					"fleet_id", id.FleetID,
+					"path", r.URL.Path,
+				)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 
+			logx.Logger(r.Context()).Warn(
+				"request rejected because authentication is missing",
+				"path", r.URL.Path,
+			)
 			writeAuthError(w, http.StatusUnauthorized, "authentication required")
 		})
 	}

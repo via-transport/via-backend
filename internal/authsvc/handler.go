@@ -3,6 +3,7 @@ package authsvc
 import (
 	"encoding/json"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"via-backend/internal/logx"
 )
 
 // UserIDFunc extracts the user ID from a request context.
@@ -73,8 +75,10 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 
 // Register handles POST /api/v1/auth/register.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+	logger := authLogger(r, "register")
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("registration rejected", "reason", "invalid_json")
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
@@ -82,10 +86,12 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	if req.Email == "" || req.Password == "" {
+		logger.Warn("registration rejected", "reason", "missing_credentials")
 		writeJSON(w, http.StatusBadRequest, errBody("email and password required"))
 		return
 	}
 	if len(req.Password) < 6 {
+		logger.Warn("registration rejected", "reason", "password_too_short", "email", logx.MaskEmail(req.Email))
 		writeJSON(w, http.StatusBadRequest, errBody("password must be at least 6 characters"))
 		return
 	}
@@ -103,6 +109,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only allow self-registration as passenger, driver, or owner.
 	if role != "passenger" && role != "driver" && role != "owner" {
+		logger.Warn("registration rejected", "reason", "invalid_role", "role", role, "email", logx.MaskEmail(req.Email))
 		writeJSON(w, http.StatusBadRequest, errBody("role must be passenger, driver, or owner"))
 		return
 	}
@@ -137,13 +144,16 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	if err := createUser(); err != nil {
 		switch {
 		case strings.Contains(err.Error(), "email already registered"):
+			logger.Warn("registration rejected", "reason", "email_exists", "email", logx.MaskEmail(req.Email))
 			writeJSON(w, http.StatusConflict, errBody("email already registered"))
 			return
 		case strings.Contains(err.Error(), "fleet already registered"):
+			logger.Warn("registration rejected", "reason", "fleet_exists", "fleet_id", req.FleetID)
 			writeJSON(w, http.StatusConflict, errBody("fleet already registered"))
 			return
 		}
 		log.Printf("[auth] create user: %v", err)
+		logger.Error("registration failed", "email", logx.MaskEmail(req.Email), "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("registration failed"))
 		return
 	}
@@ -151,32 +161,39 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	pair, err := GenerateTokenPair(h.jwtCfg, user)
 	if err != nil {
 		log.Printf("[auth] generate tokens: %v", err)
+		logger.Error("registration token generation failed", "email", logx.MaskEmail(req.Email), "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
 		return
 	}
 
+	logger.Info("registration succeeded", "user_id", user.ID, "role", user.Role, "fleet_id", user.FleetID, "email", logx.MaskEmail(user.Email))
 	writeJSON(w, http.StatusCreated, pair)
 }
 
 // SetupOwnerFleet handles POST /api/v1/auth/owner/setup-fleet.
 func (h *Handler) SetupOwnerFleet(w http.ResponseWriter, r *http.Request) {
+	logger := authLogger(r, "setup_owner_fleet")
 	userID := h.userIDFromContext(r)
 	if userID == "" {
+		logger.Warn("owner fleet setup rejected", "reason", "missing_auth")
 		writeJSON(w, http.StatusUnauthorized, errBody("authentication required"))
 		return
 	}
 	if h.ownerProvisioner == nil {
+		logger.Error("owner fleet setup unavailable", "user_id", userID)
 		writeJSON(w, http.StatusInternalServerError, errBody("owner fleet setup unavailable"))
 		return
 	}
 
 	var req SetupOwnerFleetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("owner fleet setup rejected", "reason", "invalid_json", "user_id", userID)
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
 	req.FleetName = strings.TrimSpace(req.FleetName)
 	if req.FleetName == "" {
+		logger.Warn("owner fleet setup rejected", "reason", "missing_fleet_name", "user_id", userID)
 		writeJSON(w, http.StatusBadRequest, errBody("fleet_name is required"))
 		return
 	}
@@ -185,19 +202,24 @@ func (h *Handler) SetupOwnerFleet(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case strings.Contains(err.Error(), "owner already linked"):
+			logger.Warn("owner fleet setup rejected", "reason", "owner_already_linked", "user_id", userID)
 			writeJSON(w, http.StatusConflict, errBody("owner already linked to a fleet"))
 			return
 		case strings.Contains(err.Error(), "fleet already registered"):
+			logger.Warn("owner fleet setup rejected", "reason", "fleet_exists", "user_id", userID, "fleet_name", req.FleetName)
 			writeJSON(w, http.StatusConflict, errBody("fleet already registered"))
 			return
 		case strings.Contains(err.Error(), "only owners can create fleets"):
+			logger.Warn("owner fleet setup rejected", "reason", "role_forbidden", "user_id", userID)
 			writeJSON(w, http.StatusForbidden, errBody("only owners can create fleets"))
 			return
 		case strings.Contains(err.Error(), "user not found"):
+			logger.Warn("owner fleet setup rejected", "reason", "user_not_found", "user_id", userID)
 			writeJSON(w, http.StatusNotFound, errBody("user not found"))
 			return
 		}
 		log.Printf("[auth] setup owner fleet: %v", err)
+		logger.Error("owner fleet setup failed", "user_id", userID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("fleet setup failed"))
 		return
 	}
@@ -205,10 +227,12 @@ func (h *Handler) SetupOwnerFleet(w http.ResponseWriter, r *http.Request) {
 	pair, err := GenerateTokenPair(h.jwtCfg, user)
 	if err != nil {
 		log.Printf("[auth] generate tokens after fleet setup: %v", err)
+		logger.Error("owner fleet setup token generation failed", "user_id", userID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
 		return
 	}
 
+	logger.Info("owner fleet setup succeeded", "user_id", user.ID, "fleet_id", user.FleetID, "fleet_name", req.FleetName)
 	writeJSON(w, http.StatusOK, pair)
 }
 
@@ -256,30 +280,36 @@ func (h *Handler) SearchUsers(w http.ResponseWriter, r *http.Request) {
 
 // Login handles POST /api/v1/auth/login.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	logger := authLogger(r, "login")
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("login rejected", "reason", "invalid_json")
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	if req.Email == "" || req.Password == "" {
+		logger.Warn("login rejected", "reason", "missing_credentials")
 		writeJSON(w, http.StatusBadRequest, errBody("email and password required"))
 		return
 	}
 
 	user, err := h.store.GetUserByEmail(r.Context(), req.Email)
 	if err != nil {
+		logger.Warn("login rejected", "reason", "invalid_credentials", "email", logx.MaskEmail(req.Email))
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		logger.Warn("login rejected", "reason", "invalid_credentials", "email", logx.MaskEmail(req.Email))
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
 		return
 	}
 
 	if !user.IsActive {
+		logger.Warn("login rejected", "reason", "account_disabled", "user_id", user.ID, "email", logx.MaskEmail(user.Email))
 		writeJSON(w, http.StatusForbidden, errBody("account disabled"))
 		return
 	}
@@ -289,31 +319,38 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 // GoogleAuth handles POST /api/v1/auth/google.
 func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
+	logger := authLogger(r, "google_auth")
 	if h.googleVerifier == nil {
+		logger.Error("google sign-in unavailable", "reason", "verifier_missing")
 		writeJSON(w, http.StatusServiceUnavailable, errBody("google sign-in unavailable"))
 		return
 	}
 	if len(h.googleAudiences) == 0 {
+		logger.Error("google sign-in unavailable", "reason", "audiences_missing")
 		writeJSON(w, http.StatusServiceUnavailable, errBody("google sign-in is not configured"))
 		return
 	}
 
 	var req GoogleAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("google sign-in rejected", "reason", "invalid_json")
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
 
 	identity, err := h.googleVerifier.Verify(r.Context(), req.IDToken, h.googleAudiences)
 	if err != nil {
+		logger.Warn("google sign-in rejected", "reason", "invalid_google_token", "error", err)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid google token"))
 		return
 	}
 	if identity.Email == "" || !identity.EmailVerified {
+		logger.Warn("google sign-in rejected", "reason", "email_not_verified")
 		writeJSON(w, http.StatusUnauthorized, errBody("google account email must be verified"))
 		return
 	}
 	if identity.Subject == "" {
+		logger.Warn("google sign-in rejected", "reason", "subject_missing", "email", logx.MaskEmail(identity.Email))
 		writeJSON(w, http.StatusUnauthorized, errBody("google account subject missing"))
 		return
 	}
@@ -322,10 +359,12 @@ func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		if user.GoogleSubject != "" && user.GoogleSubject != identity.Subject {
+			logger.Warn("google sign-in rejected", "reason", "subject_mismatch", "email", logx.MaskEmail(identity.Email))
 			writeJSON(w, http.StatusConflict, errBody("google account does not match the existing user"))
 			return
 		}
 		if !user.IsActive {
+			logger.Warn("google sign-in rejected", "reason", "account_disabled", "user_id", user.ID, "email", logx.MaskEmail(user.Email))
 			writeJSON(w, http.StatusForbidden, errBody("account disabled"))
 			return
 		}
@@ -343,6 +382,7 @@ func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
 	case isNotFoundError(err):
 		role := normalizeGoogleRegistrationRole(req.Role)
 		if role == "" {
+			logger.Warn("google sign-in rejected", "reason", "invalid_role", "role", req.Role, "email", logx.MaskEmail(identity.Email))
 			writeJSON(w, http.StatusBadRequest, errBody("role must be passenger, driver, or owner"))
 			return
 		}
@@ -371,30 +411,37 @@ func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
 		if err := h.store.CreateUser(r.Context(), user); err != nil {
 			switch {
 			case strings.Contains(err.Error(), "email already registered"):
+				logger.Warn("google sign-in rejected", "reason", "email_exists", "email", logx.MaskEmail(identity.Email))
 				writeJSON(w, http.StatusConflict, errBody("email already registered"))
 				return
 			case strings.Contains(err.Error(), "google account already linked"):
+				logger.Warn("google sign-in rejected", "reason", "google_subject_exists", "email", logx.MaskEmail(identity.Email))
 				writeJSON(w, http.StatusConflict, errBody("google account is already linked to another user"))
 				return
 			case strings.Contains(err.Error(), "fleet already registered"):
+				logger.Warn("google sign-in rejected", "reason", "fleet_exists")
 				writeJSON(w, http.StatusConflict, errBody("fleet already registered"))
 				return
 			}
 			log.Printf("[auth] create google user: %v", err)
+			logger.Error("google sign-in failed", "email", logx.MaskEmail(identity.Email), "error", err)
 			writeJSON(w, http.StatusInternalServerError, errBody("google sign-in failed"))
 			return
 		}
 
 		pair, pairErr := GenerateTokenPair(h.jwtCfg, user)
 		if pairErr != nil {
+			logger.Error("google sign-in token generation failed", "email", logx.MaskEmail(identity.Email), "error", pairErr)
 			writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
 			return
 		}
+		logger.Info("google sign-in succeeded", "user_id", user.ID, "role", user.Role, "fleet_id", user.FleetID, "email", logx.MaskEmail(user.Email))
 		writeJSON(w, http.StatusOK, pair)
 		return
 
 	default:
 		log.Printf("[auth] lookup google user by email: %v", err)
+		logger.Error("google sign-in lookup failed", "email", logx.MaskEmail(identity.Email), "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("google sign-in failed"))
 		return
 	}
@@ -402,34 +449,41 @@ func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
 
 // Refresh handles POST /api/v1/auth/refresh.
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
+	logger := authLogger(r, "refresh")
 	var req RefreshRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("token refresh rejected", "reason", "invalid_json")
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
 
 	claims, err := ValidateToken(h.jwtCfg.Secret, req.RefreshToken)
 	if err != nil {
+		logger.Warn("token refresh rejected", "reason", "invalid_refresh_token", "error", err)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid refresh token"))
 		return
 	}
 	if claims.TokenType != "refresh" {
+		logger.Warn("token refresh rejected", "reason", "wrong_token_type", "token_type", claims.TokenType)
 		writeJSON(w, http.StatusUnauthorized, errBody("not a refresh token"))
 		return
 	}
 
 	user, err := h.store.GetUser(r.Context(), claims.Sub)
 	if err != nil {
+		logger.Warn("token refresh rejected", "reason", "user_not_found", "user_id", claims.Sub)
 		writeJSON(w, http.StatusUnauthorized, errBody("user not found"))
 		return
 	}
 
 	pair, err := GenerateTokenPair(h.jwtCfg, user)
 	if err != nil {
+		logger.Error("token refresh failed", "user_id", user.ID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
 		return
 	}
 
+	logger.Info("token refresh succeeded", "user_id", user.ID, "role", user.Role, "fleet_id", user.FleetID)
 	writeJSON(w, http.StatusOK, pair)
 }
 
@@ -563,11 +617,14 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 // In a full implementation this would send a reset email. For now it
 // acknowledges the request.
 func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	logger := authLogger(r, "forgot_password")
 	var req ForgotPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("forgot password rejected", "reason", "invalid_json")
 		writeJSON(w, http.StatusBadRequest, errBody("invalid json"))
 		return
 	}
+	logger.Info("forgot password requested", "email", logx.MaskEmail(req.Email))
 	// Always return success to avoid email enumeration.
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
@@ -598,6 +655,7 @@ func errBody(msg string) map[string]string {
 }
 
 func (h *Handler) issueAuthPair(w http.ResponseWriter, r *http.Request, user *User) {
+	logger := authLogger(r, "issue_auth_pair")
 	now := time.Now().UTC()
 	user.LastLoginAt = now
 	if user.CreatedAt.IsZero() {
@@ -606,17 +664,28 @@ func (h *Handler) issueAuthPair(w http.ResponseWriter, r *http.Request, user *Us
 	user.UpdatedAt = now
 	if err := h.store.UpdateUser(r.Context(), user); err != nil {
 		log.Printf("[auth] update user login timestamp: %v", err)
+		logger.Error("failed to update login timestamp", "user_id", user.ID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("login failed"))
 		return
 	}
 
 	pair, err := GenerateTokenPair(h.jwtCfg, user)
 	if err != nil {
+		logger.Error("failed to generate auth tokens", "user_id", user.ID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("token generation failed"))
 		return
 	}
 
+	logger.Info("auth tokens issued", "user_id", user.ID, "role", user.Role, "fleet_id", user.FleetID, "email", logx.MaskEmail(user.Email))
 	writeJSON(w, http.StatusOK, pair)
+}
+
+func authLogger(r *http.Request, action string) *slog.Logger {
+	return logx.Logger(r.Context()).With(
+		"component", "auth",
+		"action", action,
+		"path", r.URL.Path,
+	)
 }
 
 func normalizeGoogleRegistrationRole(role string) string {

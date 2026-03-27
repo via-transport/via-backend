@@ -2,6 +2,7 @@
 /gateway
 /main
 /server
+/logs/
 
 # macOS
 .DS_Store

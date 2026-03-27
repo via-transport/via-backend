@@ -6,7 +6,7 @@ package server
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -78,6 +78,7 @@ func New(
 	// Middleware stack (outermost → innermost):
 	//   Recovery → Sentry → Tracing → Gzip → CORS → Logging → Auth → router
 	stack := middleware.Chain(mux,
+		middleware.RequestContext,
 		middleware.Recovery,
 		viasentry.HTTPMiddleware(),
 		tracing.HTTPMiddleware(cfg.NATSName),
@@ -109,7 +110,7 @@ func opsHandlerStore(handler *opsvc.Handler) opsvc.Store {
 
 // Start begins listening. It blocks until the server is shut down.
 func (s *Server) Start() error {
-	log.Printf("[server] listening on %s", s.httpServer.Addr)
+	slog.Info("http server listening", "addr", s.httpServer.Addr)
 	err := s.httpServer.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -122,6 +123,6 @@ func (s *Server) Shutdown(timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		log.Printf("[server] shutdown warning: %v", err)
+		slog.Warn("http server shutdown warning", "error", err)
 	}
 }

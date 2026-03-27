@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,6 +24,7 @@ import (
 	"via-backend/internal/config"
 	"via-backend/internal/database"
 	"via-backend/internal/fleetsvc"
+	"via-backend/internal/logx"
 	"via-backend/internal/messaging"
 	"via-backend/internal/notifysvc"
 	"via-backend/internal/opsvc"
@@ -38,6 +40,16 @@ import (
 func main() {
 	// 1. Configuration (immutable, from env)
 	cfg := config.Load()
+	logx.Configure(cfg.LogLevel)
+	slog.Info(
+		"gateway startup",
+		"environment", cfg.Environment,
+		"release", cfg.Release,
+		"log_level", cfg.LogLevel,
+		"listen_addr", cfg.ListenAddr,
+		"store_backend", cfg.StoreBackend,
+		"auth_enabled", cfg.AuthEnabled,
+	)
 
 	// 2. Distributed tracing (OpenTelemetry)
 	tracingProvider, err := tracing.Init(tracing.Config{
