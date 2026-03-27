@@ -112,6 +112,8 @@ type deleteDriverCommand struct {
 	OperationID string `json:"operation_id"`
 	DriverID    string `json:"driver_id"`
 	FleetID     string `json:"fleet_id"`
+	ActorUserID string `json:"actor_user_id,omitempty"`
+	ActorRole   string `json:"actor_role,omitempty"`
 }
 
 type createEventCommand struct {
@@ -149,7 +151,9 @@ type assignDriverCommand struct {
 }
 
 type unassignDriverPayload struct {
-	FleetID string `json:"fleet_id"`
+	FleetID     string `json:"fleet_id"`
+	ActorUserID string `json:"actor_user_id,omitempty"`
+	ActorRole   string `json:"actor_role,omitempty"`
 }
 
 type unassignDriverCommand struct {
@@ -594,6 +598,9 @@ func (h *Handler) UnassignDriver(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required"))
 		return
 	}
+	identity := auth.IdentityFromContext(r.Context())
+	body.ActorUserID = strings.TrimSpace(identity.UserID)
+	body.ActorRole = strings.TrimSpace(string(identity.Role))
 
 	cmd := &unassignDriverCommand{
 		VehicleID: vehicleID,
@@ -739,9 +746,12 @@ func (h *Handler) DeleteDriver(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("fleet_id required"))
 		return
 	}
+	identity := auth.IdentityFromContext(r.Context())
 	cmd := &deleteDriverCommand{
-		DriverID: driverID,
-		FleetID:  fleetID,
+		DriverID:    driverID,
+		FleetID:     fleetID,
+		ActorUserID: strings.TrimSpace(identity.UserID),
+		ActorRole:   strings.TrimSpace(string(identity.Role)),
 	}
 	if err := h.enqueueOperation(
 		r.Context(),
@@ -1118,7 +1128,13 @@ func (h *Handler) processDeleteDriverCommand(payload []byte) {
 	op := h.loadOperation(ctx, cmd.OperationID, deleteDriverOperationType)
 	h.markProcessing(ctx, op)
 
-	if err := h.applyDeleteDriver(ctx, cmd.DriverID, cmd.FleetID); err != nil {
+	if err := h.applyDeleteDriver(
+		ctx,
+		cmd.DriverID,
+		cmd.FleetID,
+		cmd.ActorRole,
+		cmd.ActorUserID,
+	); err != nil {
 		h.markFailed(ctx, op, "Failed to delete driver.", err)
 		return
 	}
@@ -1522,11 +1538,19 @@ func (h *Handler) applyUpdateDriver(
 	return existing, nil
 }
 
-func (h *Handler) applyDeleteDriver(ctx context.Context, driverID string, fleetID string) error {
+func (h *Handler) applyDeleteDriver(
+	ctx context.Context,
+	driverID string,
+	fleetID string,
+	actorRole string,
+	actorUserID string,
+) error {
 	now := time.Now().UTC()
 	driverEmail := ""
+	driverName := ""
 	if existingDriver, derr := h.store.GetDriver(ctx, fleetID, driverID); derr == nil {
 		driverEmail = existingDriver.Email
+		driverName = existingDriver.FullName
 	}
 	assignedVehicles, err := h.store.ListVehiclesForDriver(ctx, fleetID, driverID)
 	if err == nil {
@@ -1567,6 +1591,14 @@ func (h *Handler) applyDeleteDriver(ctx context.Context, driverID string, fleetI
 			},
 		},
 	)
+	if isDriverInitiatedRevocation(actorRole, actorUserID, driverID) {
+		h.notifyFleetManagersOfDriverFleetRevocation(
+			ctx,
+			strings.TrimSpace(fleetID),
+			strings.TrimSpace(driverID),
+			driverName,
+		)
+	}
 	h.publishDriverAccessRevokedEvent(fleetID, driverID)
 	return nil
 }
@@ -1806,10 +1838,14 @@ func (h *Handler) applyUnassignDriver(
 
 	previousDriverID := strings.TrimSpace(v.DriverID)
 	previousDriverEmail := ""
+	previousDriverName := strings.TrimSpace(v.DriverName)
 	unassignmentMessage := buildDriverUnassignmentMessage(v)
 	if previousDriverID != "" {
 		if previousDriver, derr := h.store.GetDriver(ctx, body.FleetID, previousDriverID); derr == nil {
 			previousDriverEmail = previousDriver.Email
+			if previousDriverName == "" {
+				previousDriverName = strings.TrimSpace(previousDriver.FullName)
+			}
 			filtered := make([]string, 0, len(previousDriver.AssignedVehicleIDs))
 			for _, id := range previousDriver.AssignedVehicleIDs {
 				if !strings.EqualFold(strings.TrimSpace(id), vehicleID) {
@@ -1860,6 +1896,17 @@ func (h *Handler) applyUnassignDriver(
 			},
 		)
 	}
+	if previousDriverID != "" &&
+		isDriverInitiatedRevocation(body.ActorRole, body.ActorUserID, previousDriverID) {
+		h.notifyFleetManagersOfVehicleRevocation(
+			ctx,
+			strings.TrimSpace(v.FleetID),
+			strings.TrimSpace(v.ID),
+			vehicleDisplayLabel(v),
+			previousDriverID,
+			previousDriverName,
+		)
+	}
 
 	h.fanoutVehicleChange(
 		v.FleetID,
@@ -1901,6 +1948,139 @@ func (h *Handler) resolveDriverNotificationRecipients(
 	}
 
 	return recipients
+}
+
+func isDriverInitiatedRevocation(actorRole, actorUserID, driverID string) bool {
+	normalizedRole := strings.ToLower(strings.TrimSpace(actorRole))
+	if normalizedRole == string(auth.RoleDriver) {
+		return true
+	}
+	normalizedActorID := strings.TrimSpace(actorUserID)
+	normalizedDriverID := strings.TrimSpace(driverID)
+	return normalizedActorID != "" &&
+		normalizedDriverID != "" &&
+		strings.EqualFold(normalizedActorID, normalizedDriverID)
+}
+
+func (h *Handler) resolveFleetManagerNotificationRecipients(
+	ctx context.Context,
+	fleetID string,
+) []string {
+	normalizedFleetID := strings.TrimSpace(fleetID)
+	if h.userStore == nil || normalizedFleetID == "" {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	recipients := make([]string, 0, 4)
+	addUsersByRole := func(role string) {
+		users, err := h.userStore.ListUsers(ctx, role, normalizedFleetID)
+		if err != nil {
+			log.Printf(
+				"[fleet] load %s users for manager notification (fleet=%s): %v",
+				role,
+				normalizedFleetID,
+				err,
+			)
+			return
+		}
+		for i := range users {
+			userID := strings.TrimSpace(users[i].ID)
+			if userID == "" {
+				continue
+			}
+			if _, ok := seen[userID]; ok {
+				continue
+			}
+			seen[userID] = struct{}{}
+			recipients = append(recipients, userID)
+		}
+	}
+
+	addUsersByRole(string(auth.RoleOwner))
+	addUsersByRole(string(auth.RoleAdmin))
+	return recipients
+}
+
+func (h *Handler) notifyFleetManagersOfDriverFleetRevocation(
+	ctx context.Context,
+	fleetID string,
+	driverID string,
+	driverName string,
+) {
+	recipients := h.resolveFleetManagerNotificationRecipients(ctx, fleetID)
+	if len(recipients) == 0 {
+		return
+	}
+
+	label := strings.TrimSpace(driverName)
+	if label == "" {
+		label = strings.TrimSpace(driverID)
+	}
+	if label == "" {
+		label = "A driver"
+	}
+
+	h.pushDriverNotificationToRecipients(
+		ctx,
+		recipients,
+		&notifysvc.Notification{
+			FleetID: strings.TrimSpace(fleetID),
+			Type:    "driver_request_update",
+			Title:   "Driver Access Revoked",
+			Body:    label + " revoked owner/fleet authorization.",
+			Data: map[string]string{
+				"event_type": "driver_access_revoked_by_driver",
+				"driver_id":  strings.TrimSpace(driverID),
+			},
+		},
+	)
+}
+
+func (h *Handler) notifyFleetManagersOfVehicleRevocation(
+	ctx context.Context,
+	fleetID string,
+	vehicleID string,
+	vehicleLabel string,
+	driverID string,
+	driverName string,
+) {
+	recipients := h.resolveFleetManagerNotificationRecipients(ctx, fleetID)
+	if len(recipients) == 0 {
+		return
+	}
+
+	driverLabel := strings.TrimSpace(driverName)
+	if driverLabel == "" {
+		driverLabel = strings.TrimSpace(driverID)
+	}
+	if driverLabel == "" {
+		driverLabel = "A driver"
+	}
+	normalizedVehicleLabel := strings.TrimSpace(vehicleLabel)
+	if normalizedVehicleLabel == "" {
+		normalizedVehicleLabel = strings.TrimSpace(vehicleID)
+	}
+	if normalizedVehicleLabel == "" {
+		normalizedVehicleLabel = "a vehicle"
+	}
+
+	h.pushDriverNotificationToRecipients(
+		ctx,
+		recipients,
+		&notifysvc.Notification{
+			FleetID:   strings.TrimSpace(fleetID),
+			VehicleID: strings.TrimSpace(vehicleID),
+			Type:      "driver_request_update",
+			Title:     "Vehicle Authorization Revoked",
+			Body:      driverLabel + " revoked vehicle authorization for " + normalizedVehicleLabel + ".",
+			Data: map[string]string{
+				"event_type": "driver_vehicle_authorization_revoked",
+				"driver_id":  strings.TrimSpace(driverID),
+				"vehicle_id": strings.TrimSpace(vehicleID),
+			},
+		},
+	)
 }
 
 func (h *Handler) pushDriverNotificationToRecipients(

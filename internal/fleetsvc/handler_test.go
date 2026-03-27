@@ -687,7 +687,13 @@ func TestApplyDeleteDriverClearsAssignedVehiclesBeforeRemovingDriver(t *testing.
 
 	handler := &Handler{store: store, notifyStore: notifStore}
 
-	if err := handler.applyDeleteDriver(context.Background(), "driver-1", "fleet-1"); err != nil {
+	if err := handler.applyDeleteDriver(
+		context.Background(),
+		"driver-1",
+		"fleet-1",
+		"",
+		"",
+	); err != nil {
 		t.Fatalf("applyDeleteDriver returned error: %v", err)
 	}
 
@@ -712,6 +718,58 @@ func TestApplyDeleteDriverClearsAssignedVehiclesBeforeRemovingDriver(t *testing.
 	if notifStore.items[0].UserID != "driver-1" ||
 		notifStore.items[0].Data["event_type"] != "driver_access_removed" {
 		t.Fatalf("expected fleet-leave notification, got %#v", notifStore.items[0])
+	}
+}
+
+func TestApplyDeleteDriverDriverInitiatedNotifiesFleetManagers(t *testing.T) {
+	t.Parallel()
+
+	store := newHandlerTestStore()
+	notifStore := &handlerTestNotifStore{}
+	userStore := &handlerTestUserStore{
+		byEmail: map[string]*authsvc.User{
+			"owner.one@via.local": {
+				ID:      "owner-1",
+				Email:   "owner.one@via.local",
+				Role:    "owner",
+				FleetID: "fleet-1",
+			},
+		},
+	}
+	now := time.Now().UTC()
+	store.drivers[store.driverKey("fleet-1", "driver-1")] = &Driver{
+		ID:                 "driver-1",
+		FleetID:            "fleet-1",
+		FullName:           "Driver One",
+		Email:              "driver.one@via.local",
+		AssignedVehicleIDs: []string{},
+		IsActive:           true,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+
+	handler := &Handler{store: store, notifyStore: notifStore, userStore: userStore}
+
+	if err := handler.applyDeleteDriver(
+		context.Background(),
+		"driver-1",
+		"fleet-1",
+		"driver",
+		"driver-1",
+	); err != nil {
+		t.Fatalf("applyDeleteDriver returned error: %v", err)
+	}
+
+	foundOwnerNotification := false
+	for _, item := range notifStore.items {
+		if item.UserID == "owner-1" &&
+			item.Data["event_type"] == "driver_access_revoked_by_driver" {
+			foundOwnerNotification = true
+			break
+		}
+	}
+	if !foundOwnerNotification {
+		t.Fatalf("expected owner notification for driver-initiated revocation, got %#v", notifStore.items)
 	}
 }
 
@@ -777,5 +835,65 @@ func TestApplyUnassignDriverNotifiesResolvedAuthUser(t *testing.T) {
 	}
 	if !foundAuthUserNotification {
 		t.Fatalf("expected driver_unassigned notification for resolved auth user, got %#v", notifStore.items)
+	}
+}
+
+func TestApplyUnassignDriverDriverInitiatedNotifiesFleetManagers(t *testing.T) {
+	t.Parallel()
+
+	store := newHandlerTestStore()
+	notifStore := &handlerTestNotifStore{}
+	userStore := &handlerTestUserStore{
+		byEmail: map[string]*authsvc.User{
+			"owner.one@via.local": {
+				ID:      "owner-1",
+				Email:   "owner.one@via.local",
+				Role:    "owner",
+				FleetID: "fleet-1",
+			},
+		},
+	}
+	now := time.Now().UTC()
+	store.vehicles[store.vehicleKey("fleet-1", "vehicle-1")] = &Vehicle{
+		ID:                 "vehicle-1",
+		FleetID:            "fleet-1",
+		RegistrationNumber: "ND-4521",
+		Nickname:           "Morning Shuttle",
+		DriverID:           "driver-1",
+		DriverName:         "Driver One",
+		LastUpdated:        now,
+		CreatedAt:          now,
+	}
+	store.drivers[store.driverKey("fleet-1", "driver-1")] = &Driver{
+		ID:                 "driver-1",
+		FleetID:            "fleet-1",
+		FullName:           "Driver One",
+		AssignedVehicleIDs: []string{"vehicle-1"},
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+
+	handler := &Handler{store: store, notifyStore: notifStore, userStore: userStore}
+
+	_, err := handler.applyUnassignDriver(context.Background(), "vehicle-1", unassignDriverPayload{
+		FleetID:     "fleet-1",
+		ActorRole:   "driver",
+		ActorUserID: "driver-1",
+	})
+	if err != nil {
+		t.Fatalf("applyUnassignDriver returned error: %v", err)
+	}
+
+	foundOwnerNotification := false
+	for _, item := range notifStore.items {
+		if item.UserID == "owner-1" &&
+			item.Data["event_type"] == "driver_vehicle_authorization_revoked" &&
+			item.VehicleID == "vehicle-1" {
+			foundOwnerNotification = true
+			break
+		}
+	}
+	if !foundOwnerNotification {
+		t.Fatalf("expected owner notification for vehicle revocation, got %#v", notifStore.items)
 	}
 }
