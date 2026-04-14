@@ -19,6 +19,9 @@ This service is the fleet control plane and realtime gateway for tenant-scoped f
   - Topic selection: `topic=gps` (default), `topic=trip`, `topic=ops`, or `topic=events`
 - Also exposes a spec-aligned vehicle stream route:
   - `GET /api/v1/vehicles/{id}/stream?fleet_id=<tenant>`
+- Ships with an OpenAPI spec and docs page:
+  - `GET /openapi.yaml`
+  - `GET /docs`
 - Enforces backend-side quotas:
   - location publish minimum interval (default `3s`)
   - event publish hourly cap (default `30/hour`)

@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"via-backend/internal/apispec"
 )
 
 const (
@@ -211,6 +212,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("GET /openapi.yaml", apispec.YAML())
+	mux.HandleFunc("GET /docs", apispec.Docs())
 	mux.HandleFunc("/v1/gps/update", gpsIngestHandler(nc, cache, kv))
 	mux.HandleFunc("/v1/trip/start", tripStartIngestHandler(nc))
 	mux.HandleFunc("/v1/events/publish", eventIngestHandler(nc))

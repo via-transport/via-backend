@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"via-backend/internal/apispec"
 	"via-backend/internal/appcache"
 	"via-backend/internal/auth"
 	"via-backend/internal/authsvc"
@@ -58,6 +59,8 @@ func New(
 	// --- Public / health routes (no auth required) ---
 	mux.HandleFunc("/healthz", handler.Health())
 	mux.HandleFunc("/debug/cache/stats", appcache.StatsHandler(appCache))
+	mux.HandleFunc("GET /openapi.yaml", apispec.YAML())
+	mux.HandleFunc("GET /docs", apispec.Docs())
 
 	// --- Legacy API routes (GPS, trip, events, websocket) ---
 	mux.HandleFunc("/v1/gps/update", handler.GPSIngest(gpsSvc, tenantPolicy, fleetStore))

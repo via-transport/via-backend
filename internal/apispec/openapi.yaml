@@ -1,0 +1,2398 @@
+openapi: 3.0.3
+info:
+  title: Via Backend API
+  version: 1.0.0
+  description: |
+    OpenAPI specification for the Via backend (gateway server).
+
+    Notes:
+    - Async command endpoints return `202 Accepted` with an operation id.
+    - Authentication supports either bearer JWT (`Authorization`) or API key (`X-API-Key`).
+    - WebSocket routes are documented as HTTP GET upgrade endpoints.
+servers:
+  - url: http://localhost:9090
+
+tags:
+  - name: System
+  - name: Realtime
+  - name: Auth
+  - name: Tenants
+  - name: Fleet
+  - name: Notifications
+  - name: Operations
+  - name: DriverRequests
+  - name: Subscriptions
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+paths:
+  /openapi.yaml:
+    get:
+      tags: [System]
+      summary: Download OpenAPI spec
+      security: []
+      responses:
+        '200':
+          description: OpenAPI YAML
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /docs:
+    get:
+      tags: [System]
+      summary: Interactive API docs
+      security: []
+      responses:
+        '200':
+          description: HTML docs page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /healthz:
+    get:
+      tags: [System]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /debug/cache/stats:
+    get:
+      tags: [System]
+      summary: Cache metrics
+      security: []
+      responses:
+        '200':
+          description: Cache stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CacheStats'
+
+  /v1/gps/update:
+    post:
+      tags: [Realtime]
+      summary: Publish GPS update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GPSUpdate'
+      responses:
+        '202':
+          description: Published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishAck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '502':
+          description: Upstream broker error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/trip/start:
+    post:
+      tags: [Realtime]
+      summary: Publish trip event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RealtimeEvent'
+      responses:
+        '202':
+          description: Published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishAck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/events/publish:
+    post:
+      tags: [Realtime]
+      summary: Publish realtime event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RealtimeEvent'
+      responses:
+        '202':
+          description: Published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishAck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /ws:
+    get:
+      tags: [Realtime]
+      summary: Realtime WebSocket stream
+      description: |
+        Upgrades to WebSocket and streams topic data.
+        Use `topic=operations&operation_id=<id>` to stream operation status.
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/VehicleIDQuery'
+        - $ref: '#/components/parameters/TopicQuery'
+        - $ref: '#/components/parameters/OperationIDQuery'
+      responses:
+        '101':
+          description: Switching Protocols
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/vehicles/{id}/stream:
+    get:
+      tags: [Realtime]
+      summary: Vehicle-scoped WebSocket stream
+      description: Upgrades to WebSocket and streams messages for a vehicle.
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/FleetIDQueryRequired'
+        - $ref: '#/components/parameters/TopicQuery'
+        - $ref: '#/components/parameters/OperationIDQuery'
+      responses:
+        '101':
+          description: Switching Protocols
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/auth/google:
+    post:
+      tags: [Auth]
+      summary: Login/Register with Google ID token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoogleAuthRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/owner/setup-fleet:
+    post:
+      tags: [Auth]
+      summary: Link owner account to initial fleet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetupOwnerFleetRequest'
+      responses:
+        '200':
+          description: Fleet linked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/auth/users:
+    get:
+      tags: [Auth]
+      summary: Search users
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+        - name: role
+          in: query
+          schema:
+            type: string
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+      responses:
+        '200':
+          description: Matching users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserPublic'
+
+  /api/v1/auth/profile:
+    get:
+      tags: [Auth]
+      summary: Get current user profile
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPublic'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Auth]
+      summary: Update current user profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPublic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/auth/password:
+    put:
+      tags: [Auth]
+      summary: Change current user password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request password reset
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+      responses:
+        '200':
+          description: Request accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericStatusMessage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/tenants:
+    post:
+      tags: [Tenants]
+      summary: Create tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/public/tenants:
+    get:
+      tags: [Tenants]
+      summary: Public tenant search
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Matching public tenants
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TenantPublic'
+
+  /api/v1/tenants/{id}:
+    get:
+      tags: [Tenants]
+      summary: Get tenant by id
+      parameters:
+        - $ref: '#/components/parameters/PathTenantID'
+      responses:
+        '200':
+          description: Tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/billing/plan:
+    get:
+      tags: [Tenants]
+      summary: Get effective billing plan
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQueryRequired'
+      responses:
+        '200':
+          description: Plan view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/billing/start-trial:
+    post:
+      tags: [Tenants]
+      summary: Start trial plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartTrialRequest'
+      responses:
+        '200':
+          description: Trial started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/billing/status:
+    post:
+      tags: [Tenants]
+      summary: Update billing status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBillingStatusRequest'
+      responses:
+        '200':
+          description: Updated plan view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/service-status:
+    get:
+      tags: [Tenants]
+      summary: Service status for fleet
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQueryRequired'
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/vehicles:
+    get:
+      tags: [Fleet]
+      summary: List vehicles
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/DriverIDQuery'
+        - $ref: '#/components/parameters/RouteIDQuery'
+        - $ref: '#/components/parameters/RouteIDAltQuery'
+        - $ref: '#/components/parameters/QueryQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/OffsetQuery'
+      responses:
+        '200':
+          description: Vehicles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vehicle'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [Fleet]
+      summary: Create vehicle (async)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Vehicle'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/vehicles/{id}:
+    get:
+      tags: [Fleet]
+      summary: Get vehicle
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/FleetIDQuery'
+      responses:
+        '200':
+          description: Vehicle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vehicle'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Fleet]
+      summary: Update vehicle (async)
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehiclePatch'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [Fleet]
+      summary: Delete vehicle (async)
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/FleetIDQueryRequired'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/vehicles/{id}/status:
+    put:
+      tags: [Fleet]
+      summary: Update vehicle status (async)
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehicleStatusUpdateRequest'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/vehicles/{id}/location:
+    put:
+      tags: [Fleet]
+      summary: Update vehicle location (async)
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehicleLocationUpdateRequest'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/vehicles/{id}/assign:
+    put:
+      tags: [Fleet]
+      summary: Assign driver to vehicle (async)
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignDriverRequest'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/vehicles/{id}/unassign:
+    put:
+      tags: [Fleet]
+      summary: Unassign driver from vehicle (async)
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnassignDriverRequest'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/drivers:
+    get:
+      tags: [Fleet]
+      summary: List drivers
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/OffsetQuery'
+      responses:
+        '200':
+          description: Drivers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Driver'
+    post:
+      tags: [Fleet]
+      summary: Create driver (async)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Driver'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/drivers/{id}:
+    get:
+      tags: [Fleet]
+      summary: Get driver
+      parameters:
+        - $ref: '#/components/parameters/PathDriverID'
+        - $ref: '#/components/parameters/FleetIDQuery'
+      responses:
+        '200':
+          description: Driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Driver'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Fleet]
+      summary: Update driver (async)
+      parameters:
+        - $ref: '#/components/parameters/PathDriverID'
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverPatch'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [Fleet]
+      summary: Delete driver (async)
+      parameters:
+        - $ref: '#/components/parameters/PathDriverID'
+        - $ref: '#/components/parameters/FleetIDQueryRequired'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/events:
+    get:
+      tags: [Fleet]
+      summary: List special events
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/VehicleIDQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/OffsetQuery'
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SpecialEvent'
+    post:
+      tags: [Fleet]
+      summary: Create special event (async)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpecialEvent'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/events/{id}:
+    put:
+      tags: [Fleet]
+      summary: Update special event (async)
+      parameters:
+        - $ref: '#/components/parameters/PathEventID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventPatch'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/notices:
+    get:
+      tags: [Fleet]
+      summary: List driver notices
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/VehicleIDQuery'
+        - $ref: '#/components/parameters/DriverIDQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/OffsetQuery'
+      responses:
+        '200':
+          description: Notices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DriverNotice'
+    post:
+      tags: [Fleet]
+      summary: Create notice (async)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverNotice'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/notices/{id}/read:
+    put:
+      tags: [Fleet]
+      summary: Mark notice as read (async)
+      parameters:
+        - $ref: '#/components/parameters/PathNoticeID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+
+  /api/v1/notifications:
+    get:
+      tags: [Notifications]
+      summary: List notifications
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/UserIDQuery'
+        - name: unread
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [Notifications]
+      summary: Create notification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationCreateRequest'
+      responses:
+        '201':
+          description: Notification created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/notifications/{id}/read:
+    put:
+      tags: [Notifications]
+      summary: Mark notification read
+      parameters:
+        - $ref: '#/components/parameters/PathNotificationID'
+        - $ref: '#/components/parameters/UserIDQuery'
+      responses:
+        '200':
+          description: Updated notification
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Count unread notifications
+      parameters:
+        - $ref: '#/components/parameters/UserIDQuery'
+      responses:
+        '200':
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unread_count]
+                properties:
+                  unread_count:
+                    type: integer
+
+  /ws/notifications:
+    get:
+      tags: [Notifications]
+      summary: Notifications WebSocket
+      description: Upgrades to WebSocket for notification push.
+      responses:
+        '101':
+          description: Switching Protocols
+
+  /api/v1/operations:
+    get:
+      tags: [Operations]
+      summary: List async operations
+      parameters:
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - $ref: '#/components/parameters/FleetIDQuery'
+      responses:
+        '200':
+          description: Operations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Operation'
+
+  /api/v1/operations/{id}:
+    get:
+      tags: [Operations]
+      summary: Get async operation by id
+      parameters:
+        - $ref: '#/components/parameters/PathOperationID'
+      responses:
+        '200':
+          description: Operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/driver-requests:
+    get:
+      tags: [DriverRequests]
+      summary: List driver access requests
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/UserIDQuery'
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: request_type
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Driver requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DriverRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [DriverRequests]
+      summary: Create driver access request (async)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverRequest'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/driver-requests/{id}/approve:
+    post:
+      tags: [DriverRequests]
+      summary: Approve driver access request (async)
+      parameters:
+        - $ref: '#/components/parameters/PathDriverRequestID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/driver-requests/{id}/deny:
+    post:
+      tags: [DriverRequests]
+      summary: Deny driver access request (async)
+      parameters:
+        - $ref: '#/components/parameters/PathDriverRequestID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/driver-requests/{id}/cancel:
+    post:
+      tags: [DriverRequests]
+      summary: Cancel driver access request (async)
+      parameters:
+        - $ref: '#/components/parameters/PathDriverRequestID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/subscriptions:
+    get:
+      tags: [Subscriptions]
+      summary: List subscriptions for user
+      parameters:
+        - $ref: '#/components/parameters/UserIDQuery'
+      responses:
+        '200':
+          description: Subscriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [Subscriptions]
+      summary: Create subscription
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Subscription'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/subscriptions/{id}:
+    get:
+      tags: [Subscriptions]
+      summary: Get subscription
+      parameters:
+        - $ref: '#/components/parameters/PathSubscriptionID'
+        - $ref: '#/components/parameters/UserIDQuery'
+      responses:
+        '200':
+          description: Subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Subscriptions]
+      summary: Update subscription
+      parameters:
+        - $ref: '#/components/parameters/PathSubscriptionID'
+        - $ref: '#/components/parameters/UserIDQuery'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionUpdateRequest'
+      responses:
+        '200':
+          description: Updated subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Subscriptions]
+      summary: Cancel subscription
+      parameters:
+        - $ref: '#/components/parameters/PathSubscriptionID'
+        - $ref: '#/components/parameters/UserIDQuery'
+      responses:
+        '200':
+          description: Cancelled subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/subscriptions/vehicle/{vehicleId}:
+    get:
+      tags: [Subscriptions]
+      summary: List subscriptions by vehicle
+      parameters:
+        - $ref: '#/components/parameters/PathVehicleIDAlt'
+      responses:
+        '200':
+          description: Vehicle subscriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EnrichedSubscription'
+
+  /api/v1/subscriptions/fleet/{fleetId}:
+    get:
+      tags: [Subscriptions]
+      summary: List subscriptions by fleet
+      parameters:
+        - $ref: '#/components/parameters/PathFleetID'
+        - name: status
+          in: query
+          schema:
+            type: string
+            default: active
+      responses:
+        '200':
+          description: Fleet subscriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EnrichedSubscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/subscriptions/{id}/revoke:
+    post:
+      tags: [Subscriptions]
+      summary: Revoke subscription by id
+      parameters:
+        - $ref: '#/components/parameters/PathSubscriptionID'
+      responses:
+        '200':
+          description: Revoked subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/join-requests:
+    post:
+      tags: [Subscriptions]
+      summary: Create join request (async)
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Subscription'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Subscriptions]
+      summary: List join requests
+      parameters:
+        - $ref: '#/components/parameters/FleetIDQuery'
+        - name: status
+          in: query
+          schema:
+            type: string
+            default: pending
+      responses:
+        '200':
+          description: Join requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/JoinRequest'
+
+  /api/v1/join-requests/{id}/approve:
+    post:
+      tags: [Subscriptions]
+      summary: Approve join request (async)
+      parameters:
+        - $ref: '#/components/parameters/PathJoinRequestID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+
+  /api/v1/join-requests/{id}/deny:
+    post:
+      tags: [Subscriptions]
+      summary: Deny join request (async)
+      parameters:
+        - $ref: '#/components/parameters/PathJoinRequestID'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+
+components:
+  parameters:
+    FleetIDQuery:
+      name: fleet_id
+      in: query
+      required: false
+      schema:
+        type: string
+    FleetIDQueryRequired:
+      name: fleet_id
+      in: query
+      required: true
+      schema:
+        type: string
+    VehicleIDQuery:
+      name: vehicle_id
+      in: query
+      required: false
+      schema:
+        type: string
+    DriverIDQuery:
+      name: driver_id
+      in: query
+      required: false
+      schema:
+        type: string
+    UserIDQuery:
+      name: user_id
+      in: query
+      required: false
+      schema:
+        type: string
+    TopicQuery:
+      name: topic
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [gps, trip, ops, events, operations]
+        default: gps
+    OperationIDQuery:
+      name: operation_id
+      in: query
+      required: false
+      schema:
+        type: string
+    RouteIDQuery:
+      name: route_id
+      in: query
+      required: false
+      schema:
+        type: string
+    RouteIDAltQuery:
+      name: routeId
+      in: query
+      required: false
+      schema:
+        type: string
+    QueryQuery:
+      name: query
+      in: query
+      required: false
+      schema:
+        type: string
+    LimitQuery:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+    OffsetQuery:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+    PathVehicleID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathVehicleIDAlt:
+      name: vehicleId
+      in: path
+      required: true
+      schema:
+        type: string
+    PathDriverID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathEventID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathNoticeID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathOperationID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathNotificationID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathDriverRequestID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathSubscriptionID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathJoinRequestID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathTenantID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    PathFleetID:
+      name: fleetId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        public_message:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    CacheStats:
+      type: object
+      additionalProperties: true
+
+    GenericStatus:
+      type: object
+      properties:
+        status:
+          type: string
+
+    GenericStatusMessage:
+      type: object
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+
+    PublishAck:
+      type: object
+      required: [status, subject]
+      properties:
+        status:
+          type: string
+        subject:
+          type: string
+
+    GPSUpdate:
+      type: object
+      required: [fleet_id, vehicle_id, latitude, longitude]
+      properties:
+        fleet_id:
+          type: string
+        vehicle_id:
+          type: string
+        driver_id:
+          type: string
+        route_id:
+          type: string
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        speed_kph:
+          type: number
+          format: double
+        heading:
+          type: number
+          format: double
+        timestamp:
+          type: string
+          format: date-time
+
+    RealtimeEvent:
+      type: object
+      required: [fleet_id, vehicle_id]
+      properties:
+        fleet_id:
+          type: string
+        vehicle_id:
+          type: string
+        driver_id:
+          type: string
+        route_id:
+          type: string
+        topic:
+          type: string
+        message:
+          type: string
+        event:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, expires_at, user]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/UserPublic'
+
+    UserPublic:
+      type: object
+      required: [id, email, display_name, role, fleet_id, is_active, created_at]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+        phone:
+          type: string
+        photo_url:
+          type: string
+        workplace:
+          type: string
+        address:
+          type: string
+        employee_number:
+          type: string
+        role:
+          type: string
+        fleet_id:
+          type: string
+        vehicle_id:
+          type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 6
+        display_name:
+          type: string
+        role:
+          type: string
+          enum: [passenger, driver, owner]
+        fleet_id:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    GoogleAuthRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token:
+          type: string
+        access_token:
+          type: string
+        display_name:
+          type: string
+        photo_url:
+          type: string
+        role:
+          type: string
+          enum: [passenger, driver, owner]
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    SetupOwnerFleetRequest:
+      type: object
+      required: [fleet_name]
+      properties:
+        fleet_name:
+          type: string
+
+    UpdateProfileRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+        phone:
+          type: string
+        photo_url:
+          type: string
+        workplace:
+          type: string
+        address:
+          type: string
+        employee_number:
+          type: string
+
+    ChangePasswordRequest:
+      type: object
+      required: [old_password, new_password]
+      properties:
+        old_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 6
+
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    TenantPublic:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+
+    Tenant:
+      type: object
+      required: [id, name, plan_type, subscription_status]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        plan_type:
+          type: string
+        subscription_status:
+          type: string
+        trial_started_at:
+          type: string
+          format: date-time
+        trial_ends_at:
+          type: string
+          format: date-time
+        grace_ends_at:
+          type: string
+          format: date-time
+        vehicle_limit:
+          type: integer
+        passenger_limit:
+          type: integer
+        driver_limit:
+          type: integer
+        location_publish_interval_seconds:
+          type: integer
+        event_hourly_limit:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PlanView:
+      type: object
+      required: [tenant_id, plan_type, subscription_status, effective_status, realtime_enabled]
+      properties:
+        tenant_id:
+          type: string
+        name:
+          type: string
+        plan_type:
+          type: string
+        subscription_status:
+          type: string
+        effective_status:
+          type: string
+        realtime_enabled:
+          type: boolean
+        vehicle_limit:
+          type: integer
+        passenger_limit:
+          type: integer
+        driver_limit:
+          type: integer
+        location_publish_interval_seconds:
+          type: integer
+        event_hourly_limit:
+          type: integer
+        trial_started_at:
+          type: string
+          format: date-time
+        trial_ends_at:
+          type: string
+          format: date-time
+        grace_ends_at:
+          type: string
+          format: date-time
+        owner_message:
+          type: string
+        public_message:
+          type: string
+
+    CreateTenantRequest:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+
+    StartTrialRequest:
+      type: object
+      required: [fleet_id]
+      properties:
+        fleet_id:
+          type: string
+        name:
+          type: string
+
+    UpdateBillingStatusRequest:
+      type: object
+      required: [fleet_id]
+      properties:
+        fleet_id:
+          type: string
+        plan_type:
+          type: string
+        subscription_status:
+          type: string
+
+    ServiceStatus:
+      type: object
+      properties:
+        fleet_id:
+          type: string
+        effective_status:
+          type: string
+        realtime_enabled:
+          type: boolean
+        public_message:
+          type: string
+        location_interval:
+          type: integer
+
+    VehicleLocation:
+      type: object
+      required: [latitude, longitude]
+      properties:
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        heading:
+          type: number
+          format: double
+        speed:
+          type: number
+          format: double
+        accuracy:
+          type: number
+          format: double
+        timestamp:
+          type: string
+          format: date-time
+
+    Vehicle:
+      type: object
+      required: [id, registration_number, type, service_type, is_active, status, fleet_id]
+      properties:
+        id:
+          type: string
+        registration_number:
+          type: string
+        nickname:
+          type: string
+        type:
+          type: string
+        service_type:
+          type: string
+        is_active:
+          type: boolean
+        status:
+          type: string
+        status_message:
+          type: string
+        current_location:
+          $ref: '#/components/schemas/VehicleLocation'
+        current_route_id:
+          type: string
+        driver_id:
+          type: string
+        driver_name:
+          type: string
+        driver_phone:
+          type: string
+        fleet_id:
+          type: string
+        capacity:
+          type: integer
+        current_passengers:
+          type: integer
+        last_updated:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    VehiclePatch:
+      type: object
+      additionalProperties: true
+
+    VehicleStatusUpdateRequest:
+      type: object
+      required: [fleet_id, status]
+      properties:
+        fleet_id:
+          type: string
+        status:
+          type: string
+        status_message:
+          type: string
+
+    VehicleLocationUpdateRequest:
+      type: object
+      required: [fleet_id, location]
+      properties:
+        fleet_id:
+          type: string
+        location:
+          $ref: '#/components/schemas/VehicleLocation'
+
+    AssignDriverRequest:
+      type: object
+      required: [fleet_id, driver_id]
+      properties:
+        fleet_id:
+          type: string
+        driver_id:
+          type: string
+        driver_name:
+          type: string
+        driver_phone:
+          type: string
+
+    UnassignDriverRequest:
+      type: object
+      required: [fleet_id]
+      properties:
+        fleet_id:
+          type: string
+
+    Driver:
+      type: object
+      required: [id, email, full_name, fleet_id, is_active]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+        phone:
+          type: string
+        fleet_id:
+          type: string
+        assigned_vehicle_ids:
+          type: array
+          items:
+            type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DriverPatch:
+      type: object
+      additionalProperties: true
+
+    SpecialEvent:
+      type: object
+      required: [id, type, vehicle_id, fleet_id]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        vehicle_id:
+          type: string
+        driver_id:
+          type: string
+        fleet_id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+        delay_minutes:
+          type: integer
+        location:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    EventPatch:
+      type: object
+      additionalProperties: true
+
+    DriverNotice:
+      type: object
+      required: [id, title, message, fleet_id]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        message:
+          type: string
+        vehicle_id:
+          type: string
+        driver_id:
+          type: string
+        fleet_id:
+          type: string
+        route_id:
+          type: string
+        priority:
+          type: string
+        is_read:
+          type: boolean
+        action_url:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        read_at:
+          type: string
+          format: date-time
+
+    Notification:
+      type: object
+      required: [id, user_id, type, title, body, is_read, created_at]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        fleet_id:
+          type: string
+        vehicle_id:
+          type: string
+        type:
+          type: string
+        title:
+          type: string
+        body:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: string
+        is_read:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        read_at:
+          type: string
+          format: date-time
+
+    NotificationCreateRequest:
+      type: object
+      required: [user_id, title]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        fleet_id:
+          type: string
+        vehicle_id:
+          type: string
+        type:
+          type: string
+        title:
+          type: string
+        body:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: string
+
+    Operation:
+      type: object
+      required: [id, type, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        fleet_id:
+          type: string
+        idempotency_key:
+          type: string
+        status:
+          type: string
+        resource_id:
+          type: string
+        message:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CommandAccepted:
+      type: object
+      required: [operation_id, status, message]
+      properties:
+        operation_id:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+
+    DriverRequest:
+      type: object
+      required: [id, user_id, fleet_id, full_name, email, status]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        fleet_id:
+          type: string
+        request_type:
+          type: string
+          enum: [access, vehicle_assignment]
+        vehicle_id:
+          type: string
+        full_name:
+          type: string
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+        note:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, denied, canceled, revoked]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SubPrefs:
+      type: object
+      properties:
+        notify_on_arrival:
+          type: boolean
+        notify_on_delay:
+          type: boolean
+        notify_on_event:
+          type: boolean
+        radius_meters:
+          type: integer
+
+    Subscription:
+      type: object
+      required: [id, user_id, vehicle_id, fleet_id, status, preferences]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        vehicle_id:
+          type: string
+        fleet_id:
+          type: string
+        status:
+          type: string
+          enum: [active, paused, cancelled, pending, denied, revoked]
+        preferences:
+          $ref: '#/components/schemas/SubPrefs'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    SubscriptionUpdateRequest:
+      type: object
+      properties:
+        status:
+          type: string
+        preferences:
+          $ref: '#/components/schemas/SubPrefs'
+
+    JoinRequest:
+      allOf:
+        - $ref: '#/components/schemas/Subscription'
+        - type: object
+          properties:
+            passenger_name:
+              type: string
+            passenger_email:
+              type: string
+            passenger_phone:
+              type: string
+            passenger_workplace:
+              type: string
+            passenger_address:
+              type: string
+            passenger_employee_number:
+              type: string
+            passenger_joined_at:
+              type: string
+              format: date-time
+
+    EnrichedSubscription:
+      allOf:
+        - $ref: '#/components/schemas/Subscription'
+        - type: object
+          properties:
+            passenger_name:
+              type: string
+            passenger_email:
+              type: string
