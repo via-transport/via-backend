@@ -42,7 +42,7 @@ func (s *PGStore) CreateOwnerWithTenant(ctx context.Context, user *User, tenant 
 	}()
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO tenants (
+		INSERT INTO fleet_accounts (
 			id, name, plan_type, subscription_status, trial_started_at, trial_ends_at, grace_ends_at,
 			vehicle_limit, passenger_limit, driver_limit, location_publish_interval_seconds,
 			event_hourly_limit, created_at, updated_at
@@ -57,11 +57,23 @@ func (s *PGStore) CreateOwnerWithTenant(ctx context.Context, user *User, tenant 
 		if isUniqueViolation(err) {
 			return errors.New("fleet already registered")
 		}
-		return fmt.Errorf("insert tenant: %w", err)
+		return fmt.Errorf("insert fleet account: %w", err)
 	}
 
 	if err := s.insertUser(ctx, tx, user); err != nil {
 		return err
+	}
+
+	if strings.TrimSpace(user.FleetID) != "" {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO fleet_memberships (user_id, fleet_account_id, role, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT (user_id, fleet_account_id) DO UPDATE SET
+				role=$3,
+				updated_at=$5
+		`, user.ID, user.FleetID, user.Role, user.CreatedAt, user.UpdatedAt); err != nil {
+			return fmt.Errorf("insert fleet membership: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -97,7 +109,7 @@ func (s *PGStore) SetupOwnerFleet(ctx context.Context, userID string, tenant *te
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO tenants (
+		INSERT INTO fleet_accounts (
 			id, name, plan_type, subscription_status, trial_started_at, trial_ends_at, grace_ends_at,
 			vehicle_limit, passenger_limit, driver_limit, location_publish_interval_seconds,
 			event_hourly_limit, created_at, updated_at
@@ -112,14 +124,14 @@ func (s *PGStore) SetupOwnerFleet(ctx context.Context, userID string, tenant *te
 		if isUniqueViolation(err) {
 			return nil, errors.New("fleet already registered")
 		}
-		return nil, fmt.Errorf("insert tenant: %w", err)
+		return nil, fmt.Errorf("insert fleet account: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO tenant_memberships (user_id, tenant_id, role, created_at, updated_at)
+		INSERT INTO fleet_memberships (user_id, fleet_account_id, role, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5)
 	`, user.ID, tenant.ID, "owner", tenant.CreatedAt, tenant.UpdatedAt); err != nil {
-		return nil, fmt.Errorf("insert tenant membership: %w", err)
+		return nil, fmt.Errorf("insert fleet membership: %w", err)
 	}
 
 	user.FleetID = tenant.ID

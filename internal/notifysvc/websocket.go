@@ -17,7 +17,7 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin:  func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return true },
 	ReadBufferSize:  4096,
 	WriteBufferSize: 8192,
 }
@@ -32,6 +32,8 @@ type wsClient struct {
 	userID string
 	conn   *websocket.Conn
 	send   chan []byte
+	done   chan struct{}
+	once   sync.Once
 }
 
 // NewHub creates a new notification hub.
@@ -79,7 +81,7 @@ func (h *Hub) Unregister(c *wsClient) {
 			delete(h.clients, c.userID)
 		}
 	}
-	close(c.send)
+	c.close()
 }
 
 // SendToUser pushes a message to all connections of a user.
@@ -119,6 +121,7 @@ func (h *Handler) WSHandler(w http.ResponseWriter, r *http.Request) {
 		userID: userID,
 		conn:   conn,
 		send:   make(chan []byte, 64),
+		done:   make(chan struct{}),
 	}
 	h.hub.Register(client)
 
@@ -178,6 +181,7 @@ func (h *Handler) sendBootstrap(c *wsClient) {
 	}
 	data, _ := json.Marshal(payload)
 	select {
+	case <-c.done:
 	case c.send <- data:
 	default:
 	}
@@ -191,6 +195,8 @@ func (h *Handler) writePump(c *wsClient) {
 	}()
 	for {
 		select {
+		case <-c.done:
+			return
 		case msg, ok := <-c.send:
 			if !ok {
 				return
@@ -225,6 +231,12 @@ func (h *Handler) readPump(c *wsClient) {
 			break
 		}
 	}
+}
+
+func (c *wsClient) close() {
+	c.once.Do(func() {
+		close(c.done)
+	})
 }
 
 // SubscribeNATS subscribes to cross-instance notification subjects.

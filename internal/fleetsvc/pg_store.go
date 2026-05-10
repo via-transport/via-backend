@@ -48,8 +48,8 @@ func (s *PGStore) CreateVehicleIfWithinLimit(ctx context.Context, v *Vehicle, ve
 		_ = tx.Rollback(ctx)
 	}()
 
-	var tenantID string
-	if err := tx.QueryRow(ctx, `SELECT id FROM tenants WHERE id=$1 FOR UPDATE`, v.FleetID).Scan(&tenantID); err != nil {
+	var fleetAccountID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM fleet_accounts WHERE id=$1 FOR UPDATE`, v.FleetID).Scan(&fleetAccountID); err != nil {
 		return err
 	}
 
@@ -230,7 +230,7 @@ func (s *PGStore) PutDriver(ctx context.Context, d *Driver) error {
 	}
 	userID := strings.TrimSpace(d.ID)
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO drivers (id, user_id, email, full_name, phone, fleet_id, vehicle_id,
+		INSERT INTO driver_profiles (id, user_id, email, full_name, phone, fleet_id, vehicle_id,
 		  assigned_vehicle_ids, is_active, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (id) DO UPDATE SET
@@ -248,7 +248,7 @@ func (s *PGStore) GetDriver(ctx context.Context, fleetID, driverID string) (*Dri
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, email, full_name, phone, fleet_id,
 		       assigned_vehicle_ids, is_active, created_at, updated_at
-		FROM drivers WHERE id=$1 AND fleet_id=$2
+		FROM driver_profiles WHERE id=$1 AND fleet_id=$2
 	`, driverID, fleetID).Scan(
 		&d.ID, &d.Email, &d.FullName, &d.Phone, &d.FleetID,
 		&d.AssignedVehicleIDs, &d.IsActive, &d.CreatedAt, &d.UpdatedAt,
@@ -263,7 +263,7 @@ func (s *PGStore) GetDriver(ctx context.Context, fleetID, driverID string) (*Dri
 }
 
 func (s *PGStore) DeleteDriver(ctx context.Context, fleetID, driverID string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM drivers WHERE id=$1 AND fleet_id=$2`, driverID, fleetID)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM driver_profiles WHERE id=$1 AND fleet_id=$2`, driverID, fleetID)
 	if err != nil {
 		return err
 	}
@@ -276,7 +276,7 @@ func (s *PGStore) DeleteDriver(ctx context.Context, fleetID, driverID string) er
 func (s *PGStore) ListDrivers(ctx context.Context, fleetID string) ([]Driver, error) {
 	query := `SELECT id, email, full_name, phone, fleet_id,
 	                  assigned_vehicle_ids, is_active, created_at, updated_at
-	           FROM drivers`
+	           FROM driver_profiles`
 	args := []interface{}{}
 	if fleetID != "" {
 		query += " WHERE fleet_id=$1"

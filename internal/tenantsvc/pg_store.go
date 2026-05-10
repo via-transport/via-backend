@@ -22,7 +22,7 @@ var _ Store = (*PGStore)(nil)
 
 func (s *PGStore) Put(ctx context.Context, tenant *Tenant) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO tenants (
+		INSERT INTO fleet_accounts (
 			id, name, plan_type, subscription_status, trial_started_at, trial_ends_at, grace_ends_at,
 			vehicle_limit, passenger_limit, driver_limit, location_publish_interval_seconds,
 			event_hourly_limit, created_at, updated_at
@@ -55,7 +55,7 @@ func (s *PGStore) Get(ctx context.Context, tenantID string) (*Tenant, error) {
 		SELECT id, name, plan_type, subscription_status, trial_started_at, trial_ends_at, grace_ends_at,
 		       vehicle_limit, passenger_limit, driver_limit, location_publish_interval_seconds,
 		       event_hourly_limit, created_at, updated_at
-		FROM tenants
+		FROM fleet_accounts
 		WHERE id=$1
 	`, tenantID))
 }
@@ -65,7 +65,7 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 		SELECT id, name, plan_type, subscription_status, trial_started_at, trial_ends_at, grace_ends_at,
 		       vehicle_limit, passenger_limit, driver_limit, location_publish_interval_seconds,
 		       event_hourly_limit, created_at, updated_at
-		FROM tenants
+		FROM fleet_accounts
 		ORDER BY created_at DESC
 	`)
 	if err != nil {
